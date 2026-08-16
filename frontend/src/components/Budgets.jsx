@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { money } from '../format.js'
 
-export default function Budgets({ categories, limits, spentByCategory, onSave }) {
+export default function Budgets({ categories, limits, spentByCategory, onSave, onSignOut }) {
   const [draft, setDraft] = useState({})
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -72,6 +72,20 @@ export default function Budgets({ categories, limits, spentByCategory, onSave })
       <button className="btn" onClick={save} disabled={busy}>
         {busy ? 'Saving…' : 'Save budgets'}
       </button>
+
+      {onSignOut && (
+        <div style={{ marginTop: 28, paddingTop: 16, borderTop: '1px solid var(--grid)', textAlign: 'center' }}>
+          <button
+            onClick={onSignOut}
+            style={{
+              background: 'none', border: 0, padding: '6px 10px',
+              color: 'var(--muted)', fontSize: 13, textDecoration: 'underline',
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      )}
     </section>
   )
 }

@@ -171,19 +171,14 @@ export default function App() {
             limits={limits}
             spentByCategory={spentByCategory}
             onSave={saveBudget}
-          />
-        )}
-
-        {tab === 'budgets' && (
-          <button
-            className="btn secondary"
-            onClick={() => {
-              clearToken()
-              setTok('')
+            onSignOut={() => {
+              // Deliberate action only — a stray tap must never log the user out.
+              if (confirm("Sign out? You'll need to re-enter your access token to get back in.")) {
+                clearToken()
+                setTok('')
+              }
             }}
-          >
-            Sign out
-          </button>
+          />
         )}
       </main>
 
