@@ -1,0 +1,77 @@
+import { useEffect, useState } from 'react'
+
+import { money } from '../format.js'
+
+export default function Budgets({ categories, limits, spentByCategory, onSave }) {
+  const [draft, setDraft] = useState({})
+  const [busy, setBusy] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    const next = {}
+    limits.forEach((b) => { next[b.category] = String(b.monthly_limit) })
+    setDraft(next)
+  }, [limits])
+
+  const total = Object.values(draft).reduce((sum, v) => sum + (Number.parseFloat(v) || 0), 0)
+
+  async function save() {
+    setBusy(true)
+    setSaved(false)
+    try {
+      const current = new Map(limits.map((b) => [b.category, b.monthly_limit]))
+      const changes = []
+      categories.forEach((c) => {
+        const next = Number.parseFloat(draft[c] ?? '') || 0
+        const prev = current.get(c) ?? 0
+        if (next !== prev) changes.push([c, next])
+      })
+      // Sequential rather than parallel — SQLite locks on concurrent writes.
+      for (const [category, value] of changes) await onSave(category, value)
+      setSaved(true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h2 className="card-title">Monthly limits</h2>
+        <span className="card-sub">total {money(total)}</span>
+      </div>
+
+      <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-2)' }}>
+        Leave a category blank or set it to 0 to stop tracking a budget for it.
+      </p>
+
+      {categories.map((c) => {
+        const spent = spentByCategory[c] || 0
+        return (
+          <div className="field" key={c} style={{ marginBottom: 10 }}>
+            <label htmlFor={`b-${c}`}>
+              {c}
+              {spent > 0 && <span style={{ color: 'var(--muted)', fontWeight: 400 }}> · {money(spent)} spent</span>}
+            </label>
+            <input
+              id={`b-${c}`}
+              type="number"
+              inputMode="numeric"
+              min="0"
+              step="100"
+              placeholder="0"
+              value={draft[c] ?? ''}
+              onChange={(e) => setDraft({ ...draft, [c]: e.target.value })}
+            />
+          </div>
+        )
+      })}
+
+      {saved && <div className="banner ok" style={{ marginBottom: 12 }}>Budgets saved.</div>}
+
+      <button className="btn" onClick={save} disabled={busy}>
+        {busy ? 'Saving…' : 'Save budgets'}
+      </button>
+    </section>
+  )
+}

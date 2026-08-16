@@ -1,0 +1,29 @@
+# secrets — never commit these
+.env
+.env.local
+.env.*.local
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# local database
+*.db
+*.sqlite3
+
+# node / vite
+node_modules/
+dist/
+.vite/
+
+# editors / os
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# local run logs
+*.log
+uvi.err
