@@ -30,3 +30,11 @@ uvi.err
 
 # Supabase CLI local scratch state (project link cache, not project config)
 supabase/
+
+# Vercel CLI project link (project/org IDs — not secret, but per-machine state;
+# CI gets the same via VERCEL_ORG_ID / VERCEL_PROJECT_ID repo secrets instead)
+.vercel/
+
+# Claude Code local settings — can capture raw secrets in its permission-rule
+# log (e.g. tokens passed as bash command arguments). Never commit this.
+.claude/

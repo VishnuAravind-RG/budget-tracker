@@ -1,0 +1,31 @@
+name: Deploy frontend to Vercel
+
+# Render auto-deploys the backend on push because it's connected via its own
+# GitHub App. Vercel isn't (that needs a one-time browser authorization this
+# repo doesn't have), so this workflow does the equivalent: any push that
+# touches frontend/ triggers a production deploy here instead.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/deploy-frontend.yml"
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel
+
+      - name: Deploy to Vercel (production)
+        working-directory: frontend
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: vercel deploy --prod --token="$VERCEL_TOKEN" --yes
