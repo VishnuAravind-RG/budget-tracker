@@ -5,11 +5,13 @@ from sqlalchemy.orm import sessionmaker
 
 from models import Base
 
-# On Railway: the Postgres plugin sets DATABASE_URL for you.
-# Falls back to local SQLite so `uvicorn main:app --reload` just works.
+# In production: DATABASE_URL is the Supabase pooler connection string (set on
+# Render as a secret env var). Falls back to local SQLite so
+# `uvicorn main:app --reload` just works with nothing configured.
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./budget.db")
 
-# Railway/Heroku hand out "postgres://", which SQLAlchemy 2.x no longer accepts.
+# Some providers (Heroku, older Railway configs) hand out "postgres://", which
+# SQLAlchemy 2.x no longer accepts. Harmless no-op on Supabase's own "postgresql://".
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 

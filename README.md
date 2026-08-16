@@ -75,6 +75,14 @@ Open it, paste the same `AUTH_TOKEN`, and you're in.
 
 ## Deploy
 
+Free-forever stack, no card required anywhere: **Supabase** (Postgres) +
+**Render** (backend) + **Vercel** (frontend). The one real tradeoff: Render's
+free web service sleeps after 15 min idle and takes ~30–50s to wake on the next
+request — fine for a personal app, annoying if you want instant loads every time.
+(Railway has no cold starts but requires a payment method on file — swap it in
+by pointing `render.yaml`'s DB steps at Railway's Postgres plugin instead, if
+you'd rather pay ~$0–5/mo for that.)
+
 ### 1 · Push to GitHub
 
 ```bash
@@ -89,38 +97,49 @@ git push -u origin main
 `.gitignore` already excludes `.env`, `*.db`, `node_modules/` and `dist/`.
 **Double-check `git status` doesn't list `.env` before pushing.**
 
-### 2 · Backend on Railway
+### 2 · Database on Supabase
 
-1. [railway.app](https://railway.app) → **New Project → Deploy from GitHub repo** → pick your repo.
-2. Open the service → **Settings → Root Directory** → set to `backend`.
-   *(Without this, Railway builds from the repo root and won't find `requirements.txt`.)*
-3. **New → Database → Add PostgreSQL.** This sets `DATABASE_URL` on the project automatically.
-   If it lands on the database service but not the API service, go to the API service →
-   **Variables → New Variable → Add Reference → `DATABASE_URL`**.
-4. API service → **Variables**, add:
+1. [supabase.com/dashboard](https://supabase.com/dashboard) → sign up (free, no card) → **New Project**.
+2. Pick a region close to you, set a database password, create.
+3. **Project Settings → Database → Connection string → Transaction pooler.**
+   Use the **pooler** connection (port `6543`), not the direct one — the direct
+   host is IPv6-only and most hosts (Render included) can't reach it.
+   It looks like:
+   ```
+   postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
+   ```
+   That whole string is your `DATABASE_URL`.
+
+### 3 · Backend on Render
+
+The repo includes [`render.yaml`](render.yaml) — a Blueprint that pre-fills
+everything.
+
+1. [dashboard.render.com](https://dashboard.render.com) → sign up (free, no card).
+2. **New → Blueprint** → connect your GitHub account → select the repo.
+3. Render reads `render.yaml` and shows a form for the four secret values:
 
    | Variable | Value |
    |---|---|
-   | `AUTH_TOKEN` | your long random string (the one you'll paste into the app) |
-   | `ANTHROPIC_API_KEY` | `sk-ant-…` from [console.anthropic.com](https://console.anthropic.com) |
-   | `ANTHROPIC_MODEL` | `claude-opus-5` *(optional — set `claude-haiku-4-5` for a cheaper/faster fallback)* |
-   | `TZ_NAME` | `Asia/Kolkata` |
-   | `CORS_ORIGINS` | leave unset for now; set it in step 4 |
+   | `AUTH_TOKEN` | your long random string (the one you paste into the app to log in) |
+   | `DATABASE_URL` | the Supabase pooler string from step 2 |
+   | `ANTHROPIC_API_KEY` | `sk-ant-…` from [console.anthropic.com](https://console.anthropic.com) — optional, leave blank to skip AI categorization |
+   | *(everything else)* | pre-filled from `render.yaml` |
 
-   **Don't set `DATABASE_URL` by hand** — the Postgres plugin owns it.
-5. **Settings → Networking → Generate Domain.** You get something like
-   `https://budget-tracker-production.up.railway.app`.
-6. Verify: `curl https://<your-app>.up.railway.app/health` → `{"status":"ok"}`
+4. **Apply.** First build takes a few minutes. You get a URL like
+   `https://budget-tracker-api.onrender.com`.
+5. Verify: `curl https://<your-app>.onrender.com/health` → `{"status":"ok"}`
+   *(if it just woke from sleep, the first request can take ~30–50s)*
 
 Tables are created on first boot; there's no migration step.
 
-### 3 · Frontend on Vercel *(or Netlify)*
+### 4 · Frontend on Vercel *(or Netlify)*
 
 **Vercel:** [vercel.com/new](https://vercel.com/new) → import the repo →
 
 - **Root Directory:** `frontend`
 - **Framework Preset:** Vite (auto-detected)
-- **Environment Variables:** `VITE_API_URL` = `https://<your-app>.up.railway.app`
+- **Environment Variables:** `VITE_API_URL` = `https://<your-app>.onrender.com`
   *(no trailing slash)*
 - Deploy.
 
@@ -128,7 +147,7 @@ Tables are created on first boot; there's no migration step.
 
 - **Base directory:** `frontend`
 - Build command and publish dir come from `netlify.toml`
-- **Site configuration → Environment variables:** `VITE_API_URL` = your Railway URL
+- **Site configuration → Environment variables:** `VITE_API_URL` = your Render URL
 
 `vercel.json` / `netlify.toml` already handle the SPA rewrite and stop the service
 worker from being cached.
@@ -136,18 +155,18 @@ worker from being cached.
 > `VITE_API_URL` is baked in at **build** time. If you change it, redeploy — editing
 > the variable alone won't update the live site.
 
-### 4 · Lock down CORS
+### 5 · Lock down CORS
 
-Back in Railway → API service → Variables → set
+Back in Render → your service → **Environment** → set
 
 ```
 CORS_ORIGINS = https://your-frontend.vercel.app
 ```
 
-Railway redeploys automatically. (Auth is a header token, not a cookie, so `*` was
+Render redeploys automatically. (Auth is a header token, not a cookie, so `*` was
 never a security hole — this is just tidiness.)
 
-### 5 · Install the PWA
+### 6 · Install the PWA
 
 - **Android/Chrome:** open the site → **⋮ → Add to Home screen** → it installs as a
   standalone app with its own icon.

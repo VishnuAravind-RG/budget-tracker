@@ -27,3 +27,6 @@ Thumbs.db
 # local run logs
 *.log
 uvi.err
+
+# Supabase CLI local scratch state (project link cache, not project config)
+supabase/
