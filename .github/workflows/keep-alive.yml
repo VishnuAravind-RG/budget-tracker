@@ -1,0 +1,28 @@
+name: Keep backend awake
+
+# Render's free tier sleeps a service after 15 min with no requests, and the
+# next request then eats a ~30-50s cold start. Pinging every 10 min keeps it
+# warm with margin to spare. GitHub's own docs note scheduled runs can be
+# delayed under high platform load — 5 min of slack absorbs the normal case.
+#
+# Runs on GitHub's shared runners, unrelated to Render/Vercel/Supabase infra.
+# Free and unlimited on a public repo; would blow past the 2,000 min/month
+# free quota on a private one (4,300+ runs/month at 1 billed minute each).
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit the health endpoint
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
+            https://budget-tracker-api-jkub.onrender.com/health)
+          echo "Backend responded: $code"
+          if [ "$code" != "200" ]; then
+            echo "::warning::Backend health check returned $code"
+          fi
