@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, clearToken, getToken, setToken } from './api.js'
 import { monthName } from './format.js'
 import { captureLocationOnce, getLocationConsent } from './location.js'
+import { detectRecurring } from './recurring.js'
 import AddTransaction from './components/AddTransaction.jsx'
 import Budgets from './components/Budgets.jsx'
 import Dashboard from './components/Dashboard.jsx'
@@ -12,6 +13,7 @@ import Transactions from './components/Transactions.jsx'
 import Fuel from './components/Fuel.jsx'
 import Todos from './components/Todos.jsx'
 import LendingCard from './components/LendingCard.jsx'
+import RecurringCard from './components/RecurringCard.jsx'
 import { FuelIcon, HomeIcon, ListIcon, PlusIcon, ReviewIcon, TargetIcon, TodoIcon } from './components/Icons.jsx'
 
 const TABS = [
@@ -37,6 +39,7 @@ export default function App() {
   const [review, setReview] = useState(null)
   const [limits, setLimits] = useState([])
   const [lending, setLending] = useState(null)
+  const [recurring, setRecurring] = useState([])
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
 
@@ -60,13 +63,17 @@ export default function App() {
     if (!token) return
     setError('')
     try {
-      const [s, tr, tx, rv, lm, ln] = await Promise.all([
+      const [s, tr, tx, rv, lm, ln, recentAll] = await Promise.all([
         api.summary(period.month, period.year),
         api.trend(period.month, period.year),
         api.transactions(period.month, period.year),
         api.needsReview(),
         api.budgetLimits(),
         api.lending(),
+        // No month/year filter — the last 200 transactions across however
+        // many months that spans, purely to spot a merchant repeating
+        // across months. The month-scoped `tx` above can't do that alone.
+        api.transactions(),
       ])
       setSummary(s)
       setTrend(tr)
@@ -74,6 +81,7 @@ export default function App() {
       setReview(rv)
       setLimits(lm)
       setLending(ln)
+      setRecurring(detectRecurring(recentAll))
     } catch (err) {
       if (err.status !== 401) setError(err.message)
     }
@@ -208,6 +216,7 @@ export default function App() {
               onGoBudgets={() => setTab('budgets')}
             />
             <LendingCard lending={lending} onSnooze={snoozeLending} onClearReminder={clearLendingReminder} />
+            <RecurringCard items={recurring} />
           </>
         )}
 
