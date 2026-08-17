@@ -387,6 +387,9 @@ main {
   color: var(--muted);
 }
 .icon-btn:hover { background: var(--surface-2); color: var(--crit); }
+/* A non-destructive icon action (export, etc.) shouldn't turn red on hover —
+   that reads as "delete" regardless of which icon is actually inside it. */
+.icon-btn.neutral:hover { color: var(--accent); }
 
 /* ---------------------------------------------------------------- forms --- */
 

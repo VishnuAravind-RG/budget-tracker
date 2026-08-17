@@ -1,7 +1,8 @@
 import { useState } from 'react'
 
 import { dateTime, moneyExact } from '../format.js'
-import { TrashIcon } from './Icons.jsx'
+import { exportCSV } from '../export.js'
+import { DownloadIcon, TrashIcon } from './Icons.jsx'
 import MerchantLogo from './MerchantLogo.jsx'
 
 // Money that left as spending vs. money that just moved or came back — shown
@@ -15,7 +16,7 @@ const KIND_LABEL = {
 }
 const INFLOW = new Set(['income', 'repayment'])
 
-export default function Transactions({ transactions, categories, onRecategorise, onDelete }) {
+export default function Transactions({ transactions, categories, monthLabel, onRecategorise, onDelete }) {
   const [editing, setEditing] = useState(null)
 
   if (!transactions) return <div className="empty">Loading…</div>
@@ -25,7 +26,19 @@ export default function Transactions({ transactions, categories, onRecategorise,
     <section className="card">
       <div className="card-head">
         <h2 className="card-title">All transactions</h2>
-        <span className="card-sub">{transactions.length} this month</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span className="card-sub">{transactions.length} this month</span>
+          <button
+            type="button"
+            onClick={() => exportCSV(transactions, monthLabel)}
+            className="icon-btn neutral"
+            style={{ color: 'var(--accent)' }}
+            title="Export CSV"
+            aria-label="Export CSV"
+          >
+            <DownloadIcon />
+          </button>
+        </div>
       </div>
 
       <div className="rows">

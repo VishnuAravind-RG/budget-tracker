@@ -231,6 +231,7 @@ export default function App() {
           <Transactions
             transactions={transactions}
             categories={categories}
+            monthLabel={`${monthName(period.month)} ${period.year}`}
             onRecategorise={recategorise}
             onDelete={removeTransaction}
           />

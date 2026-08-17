@@ -80,3 +80,7 @@ export const BellIcon = (p) => (
 export const PinIcon = (p) => (
   <svg {...base} width="14" height="14" {...p}><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21Z" /><circle cx="12" cy="9.5" r="2.3" /></svg>
 )
+
+export const DownloadIcon = (p) => (
+  <svg {...base} width="16" height="16" {...p}><path d="M12 3v12" /><path d="M7.5 10.5 12 15l4.5-4.5" /><path d="M4.5 18.5v1a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-1" /></svg>
+)
