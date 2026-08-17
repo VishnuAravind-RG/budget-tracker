@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { dateTime, moneyExact } from '../format.js'
 import { AccountIcon, PersonIcon, ShopIcon, WalletIcon } from './Icons.jsx'
+import MerchantLogo from './MerchantLogo.jsx'
 
 const CHOICES = [
   { kind: 'expense', label: 'A shop', hint: 'counts as spending', Icon: ShopIcon },
@@ -33,6 +34,7 @@ function ReviewItem({ t, categories, onClassify }) {
   return (
     <section className="card">
       <div className="row" style={{ padding: 0, borderTop: 0 }}>
+        <MerchantLogo name={t.merchant} size={34} />
         <div className="row-main">
           <div className="row-title">{t.merchant || 'Unknown'}</div>
           <div className="row-meta">{dateTime(t.created_at)}</div>

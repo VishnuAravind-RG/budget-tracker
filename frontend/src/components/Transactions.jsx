@@ -2,6 +2,7 @@ import { useState } from 'react'
 
 import { dateTime, moneyExact } from '../format.js'
 import { TrashIcon } from './Icons.jsx'
+import MerchantLogo from './MerchantLogo.jsx'
 
 // Money that left as spending vs. money that just moved or came back — shown
 // instead of the category chip so a lend/top-up never reads as a purchase.
@@ -35,6 +36,7 @@ export default function Transactions({ transactions, categories, onRecategorise,
           return (
           <div key={t.id}>
             <div className="row">
+              <MerchantLogo name={t.merchant} size={32} />
               <div className="row-main">
                 <div className="row-title">{t.merchant || 'Unknown'}</div>
                 <div className="row-meta">
