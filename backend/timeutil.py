@@ -34,6 +34,15 @@ def local_day_key(dt_utc_naive: datetime) -> str:
     return aware.astimezone(LOCAL_TZ).strftime("%Y-%m-%d")
 
 
+def month_anchor_utc(year: int, month: int) -> datetime:
+    """Naive-UTC timestamp for noon local time on the 1st of the given month —
+    for booking a historical entry that only has a month, not a real date.
+    Noon (not midnight) keeps it safely inside the same local calendar day
+    after the UTC conversion, regardless of DST or offset."""
+    local_noon = datetime(year, month, 1, 12, 0, tzinfo=LOCAL_TZ)
+    return local_noon.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def days_in_month(year: int, month: int) -> int:
     first = datetime(year, month, 1)
     nxt = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)

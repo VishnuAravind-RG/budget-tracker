@@ -330,6 +330,37 @@ check("next_reminder_at now set", arjun2 and arjun2["next_reminder_at"] is not N
 clear_reminder = client.delete("/lending/Arjun/reminder", headers=AUTH)
 check("reminder can be cleared", clear_reminder.status_code == 200, clear_reminder.text)
 
+# --- historical import (month-only dates, e.g. from an old spreadsheet) -------
+import_items = [
+    {"amount": 500, "category": "Food & Dining", "merchant": "Groceries", "month": 6, "year": 2026},
+    {"amount": 300, "category": "Transport", "merchant": "Fuel", "month": 6, "year": 2026},
+]
+r = client.post("/transactions/import", json={"items": import_items}, headers=AUTH).json()
+check("import reports the right count", r["added"] == 2, r)
+check("import reports the exact total", r["total"] == 800.0, r)
+
+r2 = client.post("/transactions/import", json={"items": import_items}, headers=AUTH).json()
+check("re-running without force is refused, not silently duplicated", r2["status"] == "already_imported", r2)
+check("refusal reports the existing count accurately", r2["existing_count"] == 2, r2)
+
+r3 = client.post("/transactions/import", json={"items": import_items, "force": True}, headers=AUTH).json()
+check("force=true allows a deliberate second run", r3["added"] == 2, r3)
+
+june_summary = client.get("/budget/summary?month=6&year=2026", headers=AUTH).json()
+check(
+    "imported rows count toward that month's total (₹800 × 2 runs = ₹1600)",
+    june_summary["total_spent"] == 1600.0,
+    june_summary,
+)
+
+june_trend = client.get("/stats/daily?month=6&year=2026", headers=AUTH).json()
+trend_total = sum(d["spent"] for d in june_trend["days"])
+check(
+    "imported rows are EXCLUDED from the daily trend (would fake-spike the 1st)",
+    trend_total == 0.0,
+    {"trend_total": trend_total, "days_with_spend": [d for d in june_trend["days"] if d["spent"] > 0]},
+)
+
 print()
 if failures:
     print(f"{len(failures)} FAILED: {failures}")

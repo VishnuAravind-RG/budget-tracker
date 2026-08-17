@@ -22,6 +22,7 @@ from schemas import (  # noqa: E402
     CategoryUpdate,
     FuelFillIn,
     FuelFillOut,
+    ImportRequest,
     LendingBalance,
     ManualTransaction,
     MileageOut,
@@ -39,6 +40,7 @@ from timeutil import (  # noqa: E402
     days_in_month,
     local_day_key,
     local_now,
+    month_anchor_utc,
     month_range_utc,
     utc_now_naive,
 )
@@ -279,6 +281,50 @@ def delete_transaction(txn_id: int, db: Session = Depends(get_db)):
     return {"status": "deleted", "id": txn_id}
 
 
+@api.post("/transactions/import")
+def import_transactions(payload: ImportRequest, db: Session = Depends(get_db)):
+    """Bulk-loads historical expenses that only have a month, not an exact
+    date (e.g. transcribed from an old spreadsheet). Booked to noon on the
+    1st of each item's month, kind='expense', source='import' — counts
+    toward that month's budget total but is excluded from the daily trend
+    chart (see daily_trend()) so it doesn't draw a fake spike on the 1st.
+
+    Guards against an accidental double-run: refuses if an import has
+    already happened, unless `force: true` is explicitly passed.
+    """
+    if not payload.force:
+        existing = db.query(Transaction).filter(Transaction.source == "import").first()
+        if existing:
+            count = db.query(Transaction).filter(Transaction.source == "import").count()
+            return {
+                "status": "already_imported",
+                "existing_count": count,
+                "detail": "An import already ran. Pass force=true to add these on top anyway.",
+            }
+
+    added = []
+    for item in payload.items:
+        txn = Transaction(
+            amount=item.amount,
+            direction="debit",
+            category=item.category,
+            merchant=item.merchant,
+            source="import",
+            needs_review=False,
+            kind="expense",
+            created_at=month_anchor_utc(item.year, item.month),
+        )
+        db.add(txn)
+        added.append(txn)
+
+    db.commit()
+    return {
+        "status": "ok",
+        "added": len(added),
+        "total": round(sum(item.amount for item in payload.items), 2),
+    }
+
+
 # --------------------------------------------------------------------- budgets
 
 @api.get("/budget/summary", response_model=BudgetSummary)
@@ -367,7 +413,14 @@ def daily_trend(
     year: int | None = Query(default=None, ge=2000, le=2100),
     db: Session = Depends(get_db),
 ):
-    """Per-day expense totals for the month — the dashboard trend chart."""
+    """Per-day expense totals for the month — the dashboard trend chart.
+
+    Imported historical rows (source="import") only ever know a month, not a
+    real day — they're booked to the 1st at noon (see /transactions/import),
+    which would otherwise draw a fake spike there. They still count toward
+    the month's total via /budget/summary; they're just excluded from this
+    day-by-day view specifically.
+    """
     m, y = _resolve_month(month, year)
     start, end = month_range_utc(y, m)
 
@@ -375,6 +428,7 @@ def daily_trend(
         db.query(Transaction.created_at, Transaction.amount)
         .filter(
             Transaction.kind == "expense",
+            Transaction.source != "import",
             Transaction.created_at >= start,
             Transaction.created_at < end,
         )

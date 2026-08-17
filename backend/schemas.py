@@ -125,6 +125,32 @@ class TodoUpdate(BaseModel):
     done: Optional[bool] = None
 
 
+class ImportItem(BaseModel):
+    """One historical expense with no exact date — a spreadsheet only records
+    which month it happened in. Booked to the 1st of that month at noon
+    local time and excluded from the daily trend (see /stats/daily) so it
+    doesn't draw a fake spike, while still counting toward that month's
+    total via /budget/summary."""
+
+    amount: float = Field(gt=0)
+    category: str
+    merchant: Optional[str] = Field(default=None, max_length=80)
+    month: int = Field(ge=1, le=12)
+    year: int = Field(ge=2000, le=2100)
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, v: str) -> str:
+        return _validate_category(v)
+
+
+class ImportRequest(BaseModel):
+    items: list[ImportItem] = Field(min_length=1, max_length=2000)
+    # Explicit opt-in to re-run after an import already happened once —
+    # prevents an accidental double-click from silently doubling every total.
+    force: bool = False
+
+
 # ---------- responses ----------
 
 class TransactionOut(BaseModel):
