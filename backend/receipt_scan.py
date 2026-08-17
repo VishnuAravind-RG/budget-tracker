@@ -96,6 +96,15 @@ def scan_receipt(image_bytes: bytes, mime_type: str, note: str | None = None) ->
         raise ReceiptScanError(f"Gemini request failed ({e.code}): {detail}") from e
     except urllib.error.URLError as e:
         raise ReceiptScanError(f"Couldn't reach Gemini: {e.reason}") from e
+    except TimeoutError as e:
+        # A read timeout (as opposed to a connect timeout) surfaces as a bare
+        # TimeoutError here, not wrapped in URLError — confirmed in
+        # production: a slow Gemini response during a demand spike leaked
+        # this straight past the two handlers above as an unhandled
+        # exception, returning a raw 500 instead of a clean error message.
+        raise ReceiptScanError("Gemini took too long to respond — try again in a moment") from e
+    except json.JSONDecodeError as e:
+        raise ReceiptScanError("Gemini returned a response that wasn't valid JSON") from e
 
     try:
         text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])

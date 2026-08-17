@@ -263,6 +263,12 @@ async def scan_receipt_endpoint(
         result = await asyncio.to_thread(scan_receipt, image_bytes, image.content_type or "image/jpeg", note)
     except ReceiptScanError as e:
         raise HTTPException(502, str(e)) from e
+    except Exception as e:  # noqa: BLE001 — a raw TimeoutError already slipped
+        # past receipt_scan.py's specific handlers once in production (fixed
+        # there too, see receipt_scan.py) and came out as an unhandled 500.
+        # This is the backstop: whatever unexpected error type shows up next,
+        # it fails as a clean message instead of a bare server error.
+        raise HTTPException(502, f"Couldn't read that image: {e}") from e
 
     if result["amount"] <= 0:
         raise HTTPException(422, "Couldn't read an amount from that image — try a clearer photo")
