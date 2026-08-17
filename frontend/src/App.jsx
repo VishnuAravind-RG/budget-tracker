@@ -155,7 +155,12 @@ export default function App() {
   async function addManual(payload) {
     const created = await api.addManual(payload)
     setToast('Added')
-    setTab('home')
+    // Functional update, not setTab('home') directly: the add can take a
+    // couple of seconds on Render's free tier, and if the user has already
+    // navigated to a different tab while waiting, this resolving afterward
+    // shouldn't yank them back to Home out from under them. Only jump to
+    // Home if they're still sitting on Add when the response lands.
+    setTab((current) => (current === 'add' ? 'home' : current))
     refresh()
 
     // Location is opt-in and never blocks the add above — it resolves in the
@@ -230,7 +235,10 @@ export default function App() {
             onAdd={addManual}
             onScanned={() => {
               setToast('Added')
-              setTab('home')
+              // Same reasoning as addManual() above — a photo scan can take
+              // up to ~30s (Gemini vision), a much wider window for the user
+              // to have already navigated elsewhere while it was running.
+              setTab((current) => (current === 'add' ? 'home' : current))
               refresh()
             }}
           />
