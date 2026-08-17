@@ -71,10 +71,36 @@ export const api = {
   addManual: (payload) => request('/transactions/manual', { method: 'POST', body: payload }),
   setCategory: (id, category) =>
     request(`/transactions/${id}/category`, { method: 'PATCH', body: { category } }),
+  // The Review tab's richer "who is this?" answer — merchant/friend/wallet/
+  // self, resolved server-side into the right kind (lend vs. repayment etc.)
+  // and, by default, remembered so the same counterparty is never asked again.
+  classifyTransaction: (id, payload) =>
+    request(`/transactions/${id}/classify`, { method: 'PATCH', body: payload }),
   deleteTransaction: (id) => request(`/transactions/${id}`, { method: 'DELETE' }),
   summary: (month, year) => request(`/budget/summary${qs({ month, year })}`),
   trend: (month, year) => request(`/stats/daily${qs({ month, year })}`),
   budgetLimits: () => request('/budget/limits'),
   setBudget: (category, monthly_limit) =>
     request('/budget/set', { method: 'POST', body: { category, monthly_limit } }),
+
+  // ---- fuel & vehicles ----
+  vehicles: () => request('/vehicles'),
+  fuelFills: (vehicleId) => request(`/fuel/fills${qs({ vehicle_id: vehicleId })}`),
+  addFuelFill: (payload) => request('/fuel/fills', { method: 'POST', body: payload }),
+  deleteFuelFill: (id) => request(`/fuel/fills/${id}`, { method: 'DELETE' }),
+  mileage: (vehicleId) => request(`/fuel/mileage${qs({ vehicle_id: vehicleId })}`),
+
+  // ---- to-dos ----
+  todos: () => request('/todos'),
+  addTodo: (text) => request('/todos', { method: 'POST', body: { text } }),
+  updateTodo: (id, payload) => request(`/todos/${id}`, { method: 'PATCH', body: payload }),
+  deleteTodo: (id) => request(`/todos/${id}`, { method: 'DELETE' }),
+  clearCompletedTodos: () => request('/todos/clear-completed', { method: 'POST' }),
+
+  // ---- lending ----
+  lending: () => request('/lending'),
+  snoozeLendingReminder: (person, days = 3) =>
+    request(`/lending/${encodeURIComponent(person)}/snooze${qs({ days })}`, { method: 'POST' }),
+  clearLendingReminder: (person) =>
+    request(`/lending/${encodeURIComponent(person)}/reminder`, { method: 'DELETE' }),
 }

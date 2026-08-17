@@ -6,6 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_valid
 from categorizer import CATEGORIES
 
 
+def _validate_category(v: str) -> str:
+    if v not in CATEGORIES:
+        raise ValueError(f"category must be one of {CATEGORIES}")
+    return v
+
+
 # ---------- requests ----------
 
 class SMSPayload(BaseModel):
@@ -29,9 +35,7 @@ class ManualTransaction(BaseModel):
     @field_validator("category")
     @classmethod
     def _category(cls, v: str) -> str:
-        if v not in CATEGORIES:
-            raise ValueError(f"category must be one of {CATEGORIES}")
-        return v
+        return _validate_category(v)
 
 
 class CategoryUpdate(BaseModel):
@@ -40,9 +44,34 @@ class CategoryUpdate(BaseModel):
     @field_validator("category")
     @classmethod
     def _category(cls, v: str) -> str:
-        if v not in CATEGORIES:
-            raise ValueError(f"category must be one of {CATEGORIES}")
+        return _validate_category(v)
+
+
+class TransactionClassify(BaseModel):
+    """The 'who is this?' answer from the Review tab — richer than a plain
+    category change. Setting `remember=True` (the default) also upserts a
+    Payee row keyed by the transaction's payee_key, so this exact question is
+    never asked again for the same counterparty."""
+
+    kind: str
+    category: Optional[str] = None
+    label: Optional[str] = Field(default=None, max_length=80)
+    remember: bool = True
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        if v not in ("expense", "friend", "wallet", "self"):
+            # "friend"/"wallet"/"self" here map to lend-or-repayment/topup-or-
+            # transfer/transfer depending on the transaction's direction —
+            # resolved server-side in main.py, where direction is known.
+            raise ValueError("kind must be one of: expense, friend, wallet, self")
         return v
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_category(v) if v is not None else v
 
 
 class BudgetSet(BaseModel):
@@ -52,9 +81,48 @@ class BudgetSet(BaseModel):
     @field_validator("category")
     @classmethod
     def _category(cls, v: str) -> str:
-        if v not in CATEGORIES:
-            raise ValueError(f"category must be one of {CATEGORIES}")
+        return _validate_category(v)
+
+
+class VehicleIn(BaseModel):
+    id: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=60)
+    type: str
+    fuel: str = "petrol"
+    tank_capacity_l: Optional[float] = Field(default=None, gt=0)
+
+    @field_validator("type")
+    @classmethod
+    def _type(cls, v: str) -> str:
+        if v not in ("scooter", "motorcycle", "car"):
+            raise ValueError("type must be scooter, motorcycle, or car")
         return v
+
+    @field_validator("fuel")
+    @classmethod
+    def _fuel(cls, v: str) -> str:
+        if v not in ("petrol", "diesel", "ev"):
+            raise ValueError("fuel must be petrol, diesel, or ev")
+        return v
+
+
+class FuelFillIn(BaseModel):
+    vehicle_id: str
+    transaction_id: Optional[int] = None
+    amount: float = Field(gt=0)
+    liters: Optional[float] = Field(default=None, gt=0)
+    odometer: Optional[float] = Field(default=None, ge=0)
+    is_full_tank: bool = True
+    station: Optional[str] = None
+
+
+class TodoIn(BaseModel):
+    text: str = Field(min_length=1, max_length=300)
+
+
+class TodoUpdate(BaseModel):
+    text: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    done: Optional[bool] = None
 
 
 # ---------- responses ----------
@@ -71,6 +139,9 @@ class TransactionOut(BaseModel):
     needs_review: bool
     raw_text: Optional[str]
     created_at: datetime
+    kind: str = "expense"
+    payee_key: Optional[str] = None
+    counterparty: Optional[str] = None
 
     @field_serializer("created_at")
     def _utc(self, dt: datetime) -> str:
@@ -104,3 +175,74 @@ class TrendOut(BaseModel):
     month: int
     year: int
     days: list[DailyPoint]
+
+
+class VehicleOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    type: str
+    fuel: str
+    tank_capacity_l: Optional[float]
+    archived: bool
+
+
+class FuelFillOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    vehicle_id: str
+    transaction_id: Optional[int]
+    amount: float
+    liters: Optional[float]
+    odometer: Optional[float]
+    is_full_tank: bool
+    station: Optional[str]
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _utc(self, dt: datetime) -> str:
+        return dt.isoformat() + "Z"
+
+
+class MileageLeg(BaseModel):
+    from_fill_id: int
+    to_fill_id: int
+    km: float
+    liters: float
+    km_per_liter: float
+    cost_per_km: float
+
+
+class MileageOut(BaseModel):
+    vehicle_id: str
+    total_spent: float
+    total_liters: float
+    avg_price_per_liter: Optional[float]
+    avg_mileage: Optional[float]
+    last_mileage: Optional[float]
+    legs: list[MileageLeg]
+
+
+class TodoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    text: str
+    done: bool
+    order: int
+    created_at: datetime
+    completed_at: Optional[datetime]
+
+    @field_serializer("created_at", "completed_at")
+    def _utc(self, dt: Optional[datetime]) -> Optional[str]:
+        return dt.isoformat() + "Z" if dt else None
+
+
+class LendingBalance(BaseModel):
+    person: str
+    lent: float
+    repaid: float
+    outstanding: float
+    next_reminder_at: Optional[str] = None

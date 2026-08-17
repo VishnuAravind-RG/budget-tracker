@@ -149,28 +149,36 @@ main {
   left: 0;
   right: 0;
   z-index: 20;
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  display: flex;
+  overflow-x: auto;
   max-width: 640px;
   margin: 0 auto;
   padding-bottom: env(safe-area-inset-bottom);
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
+/* 7 tabs no longer fit as fixed equal columns on a narrow phone without
+   squishing "Budgets"/"History" — scroll instead of forcing 5-tab-era grid
+   math onto more items. Snap-to keeps a tab from landing half-scrolled. */
+.tabbar::-webkit-scrollbar { display: none; }
 
 .tabbar button {
   position: relative;
+  flex: 1 0 64px;
+  scroll-snap-align: start;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 9px 2px 8px;
+  padding: 9px 4px 8px;
   background: none;
   border: 0;
   color: var(--muted);
   font-size: 11px;
   font-weight: 500;
+  white-space: nowrap;
 }
+.tabbar { scroll-snap-type: x proximity; }
 .tabbar button[aria-current='page'] { color: var(--accent); }
 .tabbar svg { width: 22px; height: 22px; }
 
@@ -494,6 +502,189 @@ main {
   font-size: 12px;
   line-height: 1.4;
 }
+
+/* "Who is this?" — merchant / friend / wallet / self chooser */
+
+.who-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.who-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 11px;
+  border: 1px solid var(--axis);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-1);
+  text-align: left;
+}
+.who-btn svg { width: 18px; height: 18px; color: var(--muted); }
+.who-btn[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.who-btn[aria-pressed='true'] svg { color: var(--accent); }
+
+.who-label { font-size: 13.5px; font-weight: 600; margin-top: 2px; }
+.who-hint { font-size: 11px; color: var(--muted); }
+
+.who-detail { margin-top: 12px; }
+.who-detail input {
+  width: 100%;
+  padding: 11px 12px;
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 10px;
+  outline: none;
+}
+.who-detail input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* -------------------------------------------------------------- fuel/todo --- */
+
+.vehicle-tabs {
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  margin-bottom: 2px;
+}
+.vehicle-tabs::-webkit-scrollbar { display: none; }
+
+.vehicle-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--axis);
+  background: var(--surface);
+  color: var(--text-1);
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex: none;
+}
+.vehicle-tab[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.stat-tile {
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+.stat-tile-label { font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
+.stat-tile-value { font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
+.stat-tile-sub { font-size: 11.5px; color: var(--text-2); margin-top: 2px; }
+
+.fill-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.fill-form input {
+  padding: 10px 11px;
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 9px;
+  outline: none;
+  font-size: 13.5px;
+}
+.fill-form input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.fill-form .full-row { grid-column: 1 / -1; display: flex; gap: 8px; }
+.fill-form .full-row button:first-child { flex: 1; }
+
+.todo-input-row { display: flex; gap: 8px; margin-bottom: 4px; }
+.todo-input-row input {
+  flex: 1;
+  padding: 11px 12px;
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 10px;
+  outline: none;
+}
+.todo-input-row input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.todo-input-row button {
+  width: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+}
+.todo-input-row button:disabled { opacity: 0.4; }
+
+.todo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--grid);
+}
+.todo-row:first-child { border-top: 0; }
+
+.todo-check {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  border: 1.5px solid var(--axis);
+  display: grid;
+  place-items: center;
+  background: none;
+  color: #fff;
+}
+.todo-check.done { background: var(--good); border-color: var(--good); }
+
+.todo-text { flex: 1; font-size: 14.5px; background: none; border: 0; text-align: left; padding: 0; color: var(--text-1); }
+.todo-text.done { color: var(--muted); text-decoration: line-through; }
+
+.lending-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--grid);
+}
+.lending-row:first-child { border-top: 0; }
+.lending-avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+.lending-remind {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.lending-remind.due { color: var(--warn); font-weight: 600; }
 
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }

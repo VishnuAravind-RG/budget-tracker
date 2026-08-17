@@ -8,13 +8,18 @@ import Dashboard from './components/Dashboard.jsx'
 import Login from './components/Login.jsx'
 import Review from './components/Review.jsx'
 import Transactions from './components/Transactions.jsx'
-import { HomeIcon, ListIcon, PlusIcon, ReviewIcon, TargetIcon } from './components/Icons.jsx'
+import Fuel from './components/Fuel.jsx'
+import Todos from './components/Todos.jsx'
+import LendingCard from './components/LendingCard.jsx'
+import { FuelIcon, HomeIcon, ListIcon, PlusIcon, ReviewIcon, TargetIcon, TodoIcon } from './components/Icons.jsx'
 
 const TABS = [
   { id: 'home', label: 'Home', Icon: HomeIcon },
   { id: 'review', label: 'Review', Icon: ReviewIcon },
   { id: 'add', label: 'Add', Icon: PlusIcon },
   { id: 'history', label: 'History', Icon: ListIcon },
+  { id: 'fuel', label: 'Fuel', Icon: FuelIcon },
+  { id: 'todos', label: 'To-do', Icon: TodoIcon },
   { id: 'budgets', label: 'Budgets', Icon: TargetIcon },
 ]
 
@@ -30,6 +35,7 @@ export default function App() {
   const [transactions, setTransactions] = useState(null)
   const [review, setReview] = useState(null)
   const [limits, setLimits] = useState([])
+  const [lending, setLending] = useState(null)
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
 
@@ -53,18 +59,20 @@ export default function App() {
     if (!token) return
     setError('')
     try {
-      const [s, tr, tx, rv, lm] = await Promise.all([
+      const [s, tr, tx, rv, lm, ln] = await Promise.all([
         api.summary(period.month, period.year),
         api.trend(period.month, period.year),
         api.transactions(period.month, period.year),
         api.needsReview(),
         api.budgetLimits(),
+        api.lending(),
       ])
       setSummary(s)
       setTrend(tr)
       setTransactions(tx)
       setReview(rv)
       setLimits(lm)
+      setLending(ln)
     } catch (err) {
       if (err.status !== 401) setError(err.message)
     }
@@ -74,6 +82,24 @@ export default function App() {
     if (!token) return
     api.categories().then(setCategories).catch(() => {})
   }, [token])
+
+  // MacroDroid posts new SMS to the API in the background — the phone can
+  // have this PWA sitting open (or backgrounded) when that happens, and
+  // nothing else here re-fetches on its own. Re-checking whenever the tab
+  // regains focus/visibility means reopening the app is enough to see it,
+  // without polling constantly while it's actually in the background.
+  useEffect(() => {
+    if (!token) return
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refresh()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('focus', onVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('focus', onVisible)
+    }
+  }, [token, refresh])
 
   useEffect(() => { refresh() }, [refresh])
 
@@ -105,6 +131,12 @@ export default function App() {
     refresh()
   }
 
+  async function classify(id, payload) {
+    await api.classifyTransaction(id, payload)
+    setToast('Saved & remembered')
+    refresh()
+  }
+
   async function removeTransaction(id) {
     await api.deleteTransaction(id)
     setToast('Deleted')
@@ -121,6 +153,16 @@ export default function App() {
   async function saveBudget(category, limit) {
     await api.setBudget(category, limit)
     await refresh()
+  }
+
+  async function snoozeLending(person) {
+    await api.snoozeLendingReminder(person, 3)
+    refresh()
+  }
+
+  async function clearLendingReminder(person) {
+    await api.clearLendingReminder(person)
+    refresh()
   }
 
   const spentByCategory = Object.fromEntries((summary?.categories || []).map((c) => [c.category, c.spent]))
@@ -141,17 +183,20 @@ export default function App() {
         {error && <div className="banner error">{error}</div>}
 
         {tab === 'home' && (
-          <Dashboard
-            summary={summary}
-            trend={trend}
-            reviewCount={reviewCount}
-            onGoReview={() => setTab('review')}
-            onGoBudgets={() => setTab('budgets')}
-          />
+          <>
+            <Dashboard
+              summary={summary}
+              trend={trend}
+              reviewCount={reviewCount}
+              onGoReview={() => setTab('review')}
+              onGoBudgets={() => setTab('budgets')}
+            />
+            <LendingCard lending={lending} onSnooze={snoozeLending} onClearReminder={clearLendingReminder} />
+          </>
         )}
 
         {tab === 'review' && (
-          <Review items={review} categories={categories} onPick={recategorise} />
+          <Review items={review} categories={categories} onClassify={classify} />
         )}
 
         {tab === 'add' && <AddExpense categories={categories} onAdd={addManual} />}
@@ -164,6 +209,10 @@ export default function App() {
             onDelete={removeTransaction}
           />
         )}
+
+        {tab === 'fuel' && <Fuel />}
+
+        {tab === 'todos' && <Todos />}
 
         {tab === 'budgets' && (
           <Budgets

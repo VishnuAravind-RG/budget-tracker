@@ -11,6 +11,11 @@ import pathlib
 import sys
 import tempfile
 
+# Windows' default console codepage (cp1252) can't print ₹ — force UTF-8 so
+# this runs the same on a Windows dev box and the Linux backend it deploys to.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 TMP_DB = pathlib.Path(tempfile.gettempdir()) / "budget_smoke.db"
 TMP_DB.unlink(missing_ok=True)
 
@@ -156,6 +161,174 @@ check("raw endpoint stores the SMS verbatim", r.json()["transaction"]["raw_text"
 check("raw endpoint still categorises", r.json()["transaction"]["category"] == "Food & Dining", r.json())
 check("empty raw body rejected", client.post("/sms/ingest/raw", content="", headers=AUTH).status_code == 422)
 check("raw endpoint needs auth", client.post("/sms/ingest/raw", content=raw).status_code == 401)
+
+# --- payee memory: the "who is this, once" flow -------------------------------
+# Snapshot spend/income BEFORE any lending/top-up activity, so the budgeting
+# check below can assert an exact before/after delta instead of a fuzzy
+# threshold — precise enough to actually catch a leak, not just a gross bug.
+summary_before = client.get("/budget/summary", headers=AUTH).json()
+spent_before = summary_before["total_spent"]
+
+# A P2P UPI transfer to someone never seen before — should land in review
+# asking "who is this", not get silently filed as a plain expense.
+sms_p2p = "Rs.2000.00 debited from a/c XXXX1234 on 17-08-26 to VPA arjun123@ybl Ref 812345671"
+r = client.post("/sms/ingest", json={"text": sms_p2p}, headers=AUTH).json()
+p2p_id = r["transaction"]["id"]
+check("unknown P2P transfer needs review (could be lending)", r["transaction"]["needs_review"] is True, r)
+check("payee_key captured from the VPA", r["transaction"]["payee_key"] == "arjun123@ybl", r["transaction"])
+check("defaults to kind=expense until classified", r["transaction"]["kind"] == "expense", r["transaction"])
+
+# Answer "a person" — should become `lend` (this is a debit) and remember Arjun.
+r = client.patch(
+    f"/transactions/{p2p_id}/classify",
+    json={"kind": "friend", "label": "Arjun", "remember": True},
+    headers=AUTH,
+).json()
+check("classified as lending", r["kind"] == "lend", r)
+check("counterparty recorded", r["counterparty"] == "Arjun", r)
+check("review flag cleared", r["needs_review"] is False, r)
+check("category set to Lending", r["category"] == "Lending", r)
+
+# The SAME person sends money back later — must resolve to `repayment`
+# automatically now, with NO review needed, because we remembered them.
+sms_p2p_back = "Rs.2000.00 credited to a/c XXXX1234 on 18-08-26 by VPA arjun123@ybl Ref 812345672"
+r = client.post("/sms/ingest", json={"text": sms_p2p_back}, headers=AUTH).json()
+check("remembered friend's repayment auto-resolved, no review", r["transaction"]["needs_review"] is False, r)
+check("repayment kind assigned automatically", r["transaction"]["kind"] == "repayment", r)
+check("counterparty auto-filled from memory", r["transaction"]["counterparty"] == "Arjun", r)
+
+# A THIRD, brand-new UPI id sent to as a wallet top-up.
+sms_wallet = "Rs.1000.00 debited from a/c XXXX1234 on 17-08-26 to VPA add-money@paytm Ref 812345673"
+r = client.post("/sms/ingest", json={"text": sms_wallet}, headers=AUTH).json()
+wallet_id = r["transaction"]["id"]
+r = client.patch(
+    f"/transactions/{wallet_id}/classify",
+    json={"kind": "wallet", "label": "Paytm Wallet"},
+    headers=AUTH,
+).json()
+check("wallet top-up classified as topup, not expense", r["kind"] == "topup", r)
+
+# Loading the SAME wallet again should skip review entirely from now on.
+sms_wallet2 = "Rs.500.00 debited from a/c XXXX1234 on 19-08-26 to VPA add-money@paytm Ref 812345674"
+r = client.post("/sms/ingest", json={"text": sms_wallet2}, headers=AUTH).json()
+check("remembered wallet skips review on repeat top-up", r["transaction"]["needs_review"] is False, r)
+check("repeat top-up correctly kept out of spending", r["transaction"]["kind"] == "topup", r)
+
+# A card swipe at an unrecognised merchant — no VPA at all, must still get a
+# stable payee_key (name:-prefixed) and the same "ask once" treatment.
+sms_card = 'Rs.780.00 spent on HDFC Bank Debit Card xx1122 at CORNER STORE on 17-08-26'
+r = client.post("/sms/ingest", json={"text": sms_card}, headers=AUTH).json()
+card_id = r["transaction"]["id"]
+check("card swipe gets a name: payee key (no VPA present)", (r["transaction"]["payee_key"] or "").startswith("name:"), r)
+check("unrecognised card merchant needs review", r["transaction"]["needs_review"] is True, r)
+
+r = client.patch(
+    f"/transactions/{card_id}/classify",
+    json={"kind": "expense", "category": "Shopping", "label": "Corner Store"},
+    headers=AUTH,
+).json()
+check("card swipe classified as a real merchant expense", r["kind"] == "expense" and r["category"] == "Shopping", r)
+
+sms_card2 = 'Rs.250.00 spent on HDFC Bank Debit Card xx1122 at CORNER STORE on 18-08-26 Ref 998877665'
+r = client.post("/sms/ingest", json={"text": sms_card2}, headers=AUTH).json()
+check("repeat card-swipe merchant recognised, no review", r["transaction"]["needs_review"] is False, r)
+check("repeat card-swipe merchant gets its remembered category", r["transaction"]["category"] == "Shopping", r)
+
+# --- kind-aware budgeting: lending/top-ups must NEVER count as spending -------
+# Only the two Corner Store swipes (₹780 + ₹250 = ₹1030) are real spending in
+# this section — the ₹2000 lend, ₹2000 repayment, and ₹1000+₹500 top-ups must
+# contribute exactly zero to total_spent. An exact delta, not a fuzzy
+# threshold, so a leak of any size gets caught.
+summary = client.get("/budget/summary", headers=AUTH).json()
+check(
+    "total_spent moved by EXACTLY the two real purchases (₹1030), nothing from lending/top-ups leaked in",
+    round(summary["total_spent"] - spent_before, 2) == 1030.0,
+    {"before": spent_before, "after": summary["total_spent"]},
+)
+lending_cat = next((c for c in summary["categories"] if c["category"] == "Lending"), None)
+check("Lending category shows zero spend (it's not spending)", lending_cat is None or lending_cat["spent"] == 0, lending_cat)
+transfer_cat = next((c for c in summary["categories"] if c["category"] == "Transfer"), None)
+check("Transfer category (wallet top-ups) shows zero spend", transfer_cat is None or transfer_cat["spent"] == 0, transfer_cat)
+
+# --- vehicles & fuel mileage ----------------------------------------------------
+vehicles = client.get("/vehicles", headers=AUTH).json()
+check("three vehicles seeded on first run", len(vehicles) == 3, vehicles)
+check("Activa present", any(v["id"] == "activa" for v in vehicles))
+check("Speed 400 present", any(v["id"] == "speed400" for v in vehicles))
+check("Swift Dzire present", any(v["id"] == "swiftdzire" for v in vehicles))
+
+vehicles2 = client.get("/vehicles", headers=AUTH).json()
+check("calling /vehicles again doesn't duplicate the seed", len(vehicles2) == 3, vehicles2)
+
+fill1 = client.post(
+    "/fuel/fills",
+    json={"vehicle_id": "activa", "amount": 500, "liters": 5, "odometer": 1000, "is_full_tank": True},
+    headers=AUTH,
+).json()
+fill2 = client.post(
+    "/fuel/fills",
+    json={"vehicle_id": "activa", "amount": 400, "liters": 4, "odometer": 1200, "is_full_tank": True},
+    headers=AUTH,
+).json()
+check("fuel fill recorded", fill1["amount"] == 500.0, fill1)
+
+mileage = client.get("/fuel/mileage?vehicle_id=activa", headers=AUTH).json()
+check("mileage computed between two full-tank fills: 200km/4L = 50 km/L", mileage["avg_mileage"] == 50.0, mileage)
+check("last_mileage matches avg with only one leg", mileage["last_mileage"] == 50.0, mileage)
+check("fuel spend totalled", mileage["total_spent"] == 900.0, mileage)
+
+# A partial fill between two full tanks must not corrupt the leg — it's simply
+# not a leg endpoint, so mileage still bridges the two full tanks around it.
+client.post(
+    "/fuel/fills",
+    json={"vehicle_id": "activa", "amount": 150, "liters": 1.5, "odometer": 1100, "is_full_tank": False},
+    headers=AUTH,
+)
+mileage2 = client.get("/fuel/mileage?vehicle_id=activa", headers=AUTH).json()
+check("partial fill does not create a spurious extra leg", len(mileage2["legs"]) == 1, mileage2)
+
+check(
+    "unknown vehicle rejected",
+    client.post("/fuel/fills", json={"vehicle_id": "does-not-exist", "amount": 100, "is_full_tank": True}, headers=AUTH).status_code == 404,
+)
+
+del_fill = client.delete(f"/fuel/fills/{fill2['id']}", headers=AUTH)
+check("fuel fill deletable", del_fill.status_code == 200, del_fill.text)
+
+# --- to-dos ---------------------------------------------------------------------
+t1 = client.post("/todos", json={"text": "Pay credit card bill"}, headers=AUTH).json()
+t2 = client.post("/todos", json={"text": "Renew bike insurance"}, headers=AUTH).json()
+check("todo created", t1["done"] is False, t1)
+check("newer todo sorts first (order is descending-insert)", t2["order"] < t1["order"], (t1, t2))
+
+todos = client.get("/todos", headers=AUTH).json()
+check("todos listed", len(todos) == 2, todos)
+
+done = client.patch(f"/todos/{t1['id']}", json={"done": True}, headers=AUTH).json()
+check("todo marked done", done["done"] is True, done)
+check("completed_at stamped", done["completed_at"] is not None, done)
+
+cleared = client.post("/todos/clear-completed", headers=AUTH).json()
+check("clear-completed removes exactly the done one", cleared["cleared"] == 1, cleared)
+check("the still-open todo survives", len(client.get("/todos", headers=AUTH).json()) == 1)
+
+# --- lending reminders -----------------------------------------------------------
+lending = client.get("/lending", headers=AUTH).json()
+arjun = next((p for p in lending if p["person"] == "Arjun"), None)
+check("Arjun's lending balance tracked", arjun is not None, lending)
+check("lent amount correct", arjun and arjun["lent"] == 2000.0, arjun)
+check("repaid amount correct", arjun and arjun["repaid"] == 2000.0, arjun)
+check("fully repaid -> zero outstanding", arjun and arjun["outstanding"] == 0.0, arjun)
+
+snooze = client.post("/lending/Arjun/snooze?days=3", headers=AUTH).json()
+check("reminder scheduled", snooze["status"] == "ok", snooze)
+
+lending2 = client.get("/lending", headers=AUTH).json()
+arjun2 = next((p for p in lending2 if p["person"] == "Arjun"), None)
+check("next_reminder_at now set", arjun2 and arjun2["next_reminder_at"] is not None, arjun2)
+
+clear_reminder = client.delete("/lending/Arjun/reminder", headers=AUTH)
+check("reminder can be cleared", clear_reminder.status_code == 200, clear_reminder.text)
 
 print()
 if failures:

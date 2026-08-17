@@ -3,6 +3,17 @@ import { useState } from 'react'
 import { dateTime, moneyExact } from '../format.js'
 import { TrashIcon } from './Icons.jsx'
 
+// Money that left as spending vs. money that just moved or came back — shown
+// instead of the category chip so a lend/top-up never reads as a purchase.
+const KIND_LABEL = {
+  income: 'Received',
+  transfer: 'Transfer',
+  topup: 'Wallet top-up',
+  lend: 'Lent out',
+  repayment: 'Repaid to you',
+}
+const INFLOW = new Set(['income', 'repayment'])
+
 export default function Transactions({ transactions, categories, onRecategorise, onDelete }) {
   const [editing, setEditing] = useState(null)
 
@@ -17,27 +28,39 @@ export default function Transactions({ transactions, categories, onRecategorise,
       </div>
 
       <div className="rows">
-        {transactions.map((t) => (
+        {transactions.map((t) => {
+          const kindLabel = KIND_LABEL[t.kind]
+          const isInflow = INFLOW.has(t.kind)
+          const isMoved = t.kind === 'transfer' || t.kind === 'topup'
+          return (
           <div key={t.id}>
             <div className="row">
               <div className="row-main">
                 <div className="row-title">{t.merchant || 'Unknown'}</div>
                 <div className="row-meta">
-                  <button
-                    className="chip"
-                    onClick={() => setEditing(editing === t.id ? null : t.id)}
-                    style={{ border: 0, cursor: 'pointer' }}
-                    title="Change category"
-                  >
-                    {t.category}
-                  </button>
+                  {kindLabel ? (
+                    <span className="chip">{kindLabel}</span>
+                  ) : (
+                    <button
+                      className="chip"
+                      onClick={() => setEditing(editing === t.id ? null : t.id)}
+                      style={{ border: 0, cursor: 'pointer' }}
+                      title="Change category"
+                    >
+                      {t.category}
+                    </button>
+                  )}
+                  {t.counterparty && <span>{t.counterparty}</span>}
                   <span>{dateTime(t.created_at)}</span>
                   {t.source === 'sms' && <span>· SMS</span>}
                 </div>
               </div>
 
-              <div className={`row-amount${t.direction === 'credit' ? ' credit' : ''}`}>
-                {t.direction === 'credit' ? '+' : '−'}
+              <div
+                className={`row-amount${isInflow ? ' credit' : ''}`}
+                style={isMoved ? { color: 'var(--muted)' } : undefined}
+              >
+                {isInflow ? '+' : isMoved ? '↔ ' : t.direction === 'credit' ? '+' : '−'}
                 {moneyExact(t.amount)}
               </div>
 
@@ -72,7 +95,8 @@ export default function Transactions({ transactions, categories, onRecategorise,
               </div>
             )}
           </div>
-        ))}
+          )
+        })}
       </div>
     </section>
   )

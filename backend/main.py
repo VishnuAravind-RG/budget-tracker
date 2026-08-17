@@ -13,17 +13,27 @@ from sqlalchemy import func  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth import require_token  # noqa: E402
-from categorizer import CATEGORIES, categorize, parse_sms  # noqa: E402
+from categorizer import CATEGORIES, categorize, parse_sms, payee_key_for  # noqa: E402
 from db import get_db, init_db  # noqa: E402
-from models import Budget, Transaction  # noqa: E402
+from models import Budget, FuelFill, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
 from schemas import (  # noqa: E402
     BudgetSet,
     BudgetSummary,
     CategoryUpdate,
+    FuelFillIn,
+    FuelFillOut,
+    LendingBalance,
     ManualTransaction,
+    MileageOut,
     SMSPayload,
+    TodoIn,
+    TodoOut,
+    TodoUpdate,
+    TransactionClassify,
     TransactionOut,
     TrendOut,
+    VehicleIn,
+    VehicleOut,
 )
 from timeutil import (  # noqa: E402
     days_in_month,
@@ -98,15 +108,57 @@ def _ingest(text: str, db: Session):
     if duplicate:
         return {"status": "duplicate", "transaction": TransactionOut.model_validate(duplicate)}
 
-    result = categorize(parsed["merchant"], text, parsed["direction"])
+    merchant = parsed["merchant"]
+    direction = parsed["direction"]
+    payee_key = payee_key_for(merchant)
+    known: Payee | None = db.get(Payee, payee_key) if payee_key else None
+
+    kind = "income" if direction == "credit" else "expense"
+    category = "Income" if direction == "credit" else "Uncategorized"
+    needs_review = False
+    counterparty = None
+    note = merchant
+
+    if known:
+        # Already told what this counterparty is — trust it, never re-ask.
+        note = known.label
+        if known.kind == "friend":
+            kind = "lend" if direction == "debit" else "repayment"
+            counterparty = known.label
+            category = "Lending"
+        elif known.kind == "wallet":
+            kind = "topup" if direction == "debit" else "transfer"
+            category = "Transfer"
+        elif known.kind == "self":
+            kind = "transfer"
+            category = "Transfer"
+        elif known.kind == "expense" and direction == "debit":
+            # Payee.kind uses the same vocabulary as TransactionClassify.kind
+            # ("expense", not "merchant") — see classify_transaction().
+            category = known.default_category or "Uncategorized"
+    else:
+        result = categorize(merchant, text, direction)
+        category = result["category"]
+        needs_review = result["needs_review"]
+        # A brand-new counterparty (no rule match, so `categorize` couldn't
+        # have known it's actually a friend or a wallet) — ask once via the
+        # review queue instead of silently filing it as a plain expense,
+        # even when the AI was confident about the category. Never applies
+        # to credits: a stranger paying you is income either way.
+        if payee_key and direction == "debit" and result["source"] != "rule":
+            needs_review = True
+
     txn = Transaction(
         raw_text=text,
-        merchant=parsed["merchant"],
+        merchant=note,
         amount=parsed["amount"],
-        direction=parsed["direction"],
-        category=result["category"],
+        direction=direction,
+        category=category,
         source="sms",
-        needs_review=result["needs_review"],
+        needs_review=needs_review,
+        kind=kind,
+        payee_key=payee_key,
+        counterparty=counterparty,
     )
     db.add(txn)
     db.commit()
@@ -123,6 +175,7 @@ def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
         category=payload.category,
         source="manual",
         needs_review=False,
+        kind="income" if payload.direction == "credit" else "expense",
     )
     db.add(txn)
     db.commit()
@@ -167,6 +220,55 @@ def update_category(txn_id: int, payload: CategoryUpdate, db: Session = Depends(
     return txn
 
 
+@api.patch("/transactions/{txn_id}/classify", response_model=TransactionOut)
+def classify_transaction(txn_id: int, payload: TransactionClassify, db: Session = Depends(get_db)):
+    """The Review tab's 'who is this?' answer: merchant / friend / wallet / my
+    own account. Resolves the transaction's real kind (lend vs. repayment,
+    top-up vs. transfer — depends on the original debit/credit direction) and,
+    by default, remembers the payee so this is never asked again."""
+    txn = db.get(Transaction, txn_id)
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+
+    is_debit = txn.direction == "debit"
+    label = payload.label or txn.merchant or "Transaction"
+
+    if payload.kind == "friend":
+        txn.kind = "lend" if is_debit else "repayment"
+        txn.counterparty = label
+        txn.category = payload.category or "Lending"
+    elif payload.kind == "wallet":
+        txn.kind = "topup" if is_debit else "transfer"
+        txn.counterparty = None
+        txn.category = payload.category or "Transfer"
+    elif payload.kind == "self":
+        txn.kind = "transfer"
+        txn.counterparty = None
+        txn.category = payload.category or "Transfer"
+    else:  # "expense" — a real merchant/purchase (or, for a credit, income)
+        txn.kind = "income" if not is_debit else "expense"
+        txn.counterparty = None
+        txn.category = payload.category or txn.category
+
+    txn.merchant = label
+    txn.needs_review = False
+
+    if payload.remember and txn.payee_key:
+        payee = db.get(Payee, txn.payee_key)
+        remembered_category = txn.category if payload.kind == "expense" else None
+        if payee is None:
+            payee = Payee(key=txn.payee_key, label=label, kind=payload.kind, default_category=remembered_category)
+            db.add(payee)
+        else:
+            payee.label = label
+            payee.kind = payload.kind
+            payee.default_category = remembered_category
+
+    db.commit()
+    db.refresh(txn)
+    return txn
+
+
 @api.delete("/transactions/{txn_id}")
 def delete_transaction(txn_id: int, db: Session = Depends(get_db)):
     txn = db.get(Transaction, txn_id)
@@ -189,17 +291,21 @@ def budget_summary(
     start, end = month_range_utc(y, m)
 
     rows = (
-        db.query(Transaction.category, Transaction.direction, func.sum(Transaction.amount))
+        db.query(Transaction.category, Transaction.kind, func.sum(Transaction.amount))
         .filter(Transaction.created_at >= start, Transaction.created_at < end)
-        .group_by(Transaction.category, Transaction.direction)
+        .group_by(Transaction.category, Transaction.kind)
         .all()
     )
+    # Only "expense" is real spending. topup/transfer/lend/repayment
+    # deliberately never reach spent_map — a wallet load or money lent to a
+    # friend is not a purchase, and counting it as one is exactly the kind of
+    # naive-tracker bug this app exists to avoid.
     spent_map: dict[str, float] = {}
     total_income = 0.0
-    for category, direction, total in rows:
-        if direction == "debit":
+    for category, kind, total in rows:
+        if kind == "expense":
             spent_map[category] = spent_map.get(category, 0.0) + float(total or 0)
-        else:
+        elif kind == "income":
             total_income += float(total or 0)
 
     limits = {b.category: b.monthly_limit for b in db.query(Budget).all()}
@@ -261,14 +367,14 @@ def daily_trend(
     year: int | None = Query(default=None, ge=2000, le=2100),
     db: Session = Depends(get_db),
 ):
-    """Per-day debit totals for the month — the dashboard trend chart."""
+    """Per-day expense totals for the month — the dashboard trend chart."""
     m, y = _resolve_month(month, year)
     start, end = month_range_utc(y, m)
 
     rows = (
         db.query(Transaction.created_at, Transaction.amount)
         .filter(
-            Transaction.direction == "debit",
+            Transaction.kind == "expense",
             Transaction.created_at >= start,
             Transaction.created_at < end,
         )
@@ -297,6 +403,235 @@ def get_categories():
 def me():
     """Cheap endpoint the frontend hits to validate a token at login."""
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------- fuel
+
+DEFAULT_VEHICLES = [
+    {"id": "activa", "name": "Activa", "type": "scooter", "fuel": "petrol", "tank_capacity_l": 5.3},
+    {"id": "speed400", "name": "Speed 400", "type": "motorcycle", "fuel": "petrol", "tank_capacity_l": 13.0},
+    {"id": "swiftdzire", "name": "Swift Dzire", "type": "car", "fuel": "petrol", "tank_capacity_l": 42.0},
+]
+
+
+@api.get("/vehicles", response_model=list[VehicleOut])
+def list_vehicles(db: Session = Depends(get_db)):
+    if db.query(Vehicle).count() == 0:
+        # First run: seed the three known vehicles. `merge` (upsert), not
+        # add — makes a concurrent duplicate call harmless instead of a
+        # duplicate-key error.
+        for v in DEFAULT_VEHICLES:
+            db.merge(Vehicle(**v, archived=False))
+        db.commit()
+    return db.query(Vehicle).order_by(Vehicle.archived, Vehicle.name).all()
+
+
+@api.post("/vehicles", response_model=VehicleOut)
+def upsert_vehicle(payload: VehicleIn, db: Session = Depends(get_db)):
+    existing = db.get(Vehicle, payload.id)
+    if existing:
+        existing.name = payload.name
+        existing.type = payload.type
+        existing.fuel = payload.fuel
+        existing.tank_capacity_l = payload.tank_capacity_l
+    else:
+        db.add(Vehicle(**payload.model_dump(), archived=False))
+    db.commit()
+    return db.get(Vehicle, payload.id)
+
+
+@api.patch("/vehicles/{vehicle_id}/archive")
+def archive_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
+    vehicle = db.get(Vehicle, vehicle_id)
+    if not vehicle:
+        raise HTTPException(404, "Vehicle not found")
+    vehicle.archived = True
+    db.commit()
+    return {"status": "archived", "id": vehicle_id}
+
+
+@api.get("/fuel/fills", response_model=list[FuelFillOut])
+def list_fuel_fills(vehicle_id: str | None = Query(default=None), db: Session = Depends(get_db)):
+    q = db.query(FuelFill)
+    if vehicle_id:
+        q = q.filter(FuelFill.vehicle_id == vehicle_id)
+    return q.order_by(FuelFill.created_at).all()
+
+
+@api.post("/fuel/fills", response_model=FuelFillOut)
+def add_fuel_fill(payload: FuelFillIn, db: Session = Depends(get_db)):
+    if not db.get(Vehicle, payload.vehicle_id):
+        raise HTTPException(404, "Vehicle not found")
+    fill = FuelFill(**payload.model_dump())
+    db.add(fill)
+    db.commit()
+    db.refresh(fill)
+    return fill
+
+
+@api.delete("/fuel/fills/{fill_id}")
+def delete_fuel_fill(fill_id: int, db: Session = Depends(get_db)):
+    fill = db.get(FuelFill, fill_id)
+    if not fill:
+        raise HTTPException(404, "Fill not found")
+    db.delete(fill)
+    db.commit()
+    return {"status": "deleted", "id": fill_id}
+
+
+@api.get("/fuel/mileage", response_model=MileageOut)
+def fuel_mileage(vehicle_id: str, db: Session = Depends(get_db)):
+    """km/L is only derived between two CONSECUTIVE full-tank fills with
+    odometer readings — a partial fill, or an odometer that went backwards
+    (reset or bad entry), is skipped as a leg endpoint rather than producing a
+    fabricated number."""
+    fills = (
+        db.query(FuelFill)
+        .filter(FuelFill.vehicle_id == vehicle_id)
+        .order_by(FuelFill.created_at)
+        .all()
+    )
+
+    total_spent = sum(f.amount for f in fills)
+    total_liters = sum(f.liters or 0 for f in fills)
+    priced = [f for f in fills if f.liters]
+    avg_price = sum(f.amount / f.liters for f in priced) / len(priced) if priced else None
+
+    full = [f for f in fills if f.is_full_tank and f.odometer is not None and f.liters]
+    legs = []
+    for prev, cur in zip(full, full[1:]):
+        km = cur.odometer - prev.odometer
+        if km <= 0 or not cur.liters:
+            continue  # odometer reset or bad entry — skip, don't fabricate
+        legs.append({
+            "from_fill_id": prev.id,
+            "to_fill_id": cur.id,
+            "km": km,
+            "liters": cur.liters,
+            "km_per_liter": km / cur.liters,
+            "cost_per_km": cur.amount / km,
+        })
+
+    avg_mileage = sum(leg["km_per_liter"] for leg in legs) / len(legs) if legs else None
+
+    return {
+        "vehicle_id": vehicle_id,
+        "total_spent": round(total_spent, 2),
+        "total_liters": round(total_liters, 2),
+        "avg_price_per_liter": round(avg_price, 2) if avg_price else None,
+        "avg_mileage": round(avg_mileage, 2) if avg_mileage else None,
+        "last_mileage": round(legs[-1]["km_per_liter"], 2) if legs else None,
+        "legs": legs,
+    }
+
+
+# ---------------------------------------------------------------------- todos
+
+@api.get("/todos", response_model=list[TodoOut])
+def list_todos(db: Session = Depends(get_db)):
+    return db.query(Todo).order_by(Todo.order).all()
+
+
+@api.post("/todos", response_model=TodoOut)
+def add_todo(payload: TodoIn, db: Session = Depends(get_db)):
+    first = db.query(Todo).order_by(Todo.order).first()
+    # New items go to the top, so adding one doesn't bury it under a long list.
+    order = (first.order - 1) if first else 0
+    todo = Todo(text=payload.text, order=order)
+    db.add(todo)
+    db.commit()
+    db.refresh(todo)
+    return todo
+
+
+@api.patch("/todos/{todo_id}", response_model=TodoOut)
+def update_todo(todo_id: int, payload: TodoUpdate, db: Session = Depends(get_db)):
+    todo = db.get(Todo, todo_id)
+    if not todo:
+        raise HTTPException(404, "Todo not found")
+    if payload.text is not None:
+        todo.text = payload.text
+    if payload.done is not None:
+        todo.done = payload.done
+        todo.completed_at = utc_now_naive() if payload.done else None
+    db.commit()
+    db.refresh(todo)
+    return todo
+
+
+@api.delete("/todos/{todo_id}")
+def delete_todo(todo_id: int, db: Session = Depends(get_db)):
+    todo = db.get(Todo, todo_id)
+    if not todo:
+        raise HTTPException(404, "Todo not found")
+    db.delete(todo)
+    db.commit()
+    return {"status": "deleted", "id": todo_id}
+
+
+@api.post("/todos/clear-completed")
+def clear_completed_todos(db: Session = Depends(get_db)):
+    done = db.query(Todo).filter(Todo.done.is_(True)).all()
+    for t in done:
+        db.delete(t)
+    db.commit()
+    return {"status": "ok", "cleared": len(done)}
+
+
+# -------------------------------------------------------------------- lending
+
+@api.get("/lending", response_model=list[LendingBalance])
+def lending_balances(db: Session = Depends(get_db)):
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.kind.in_(("lend", "repayment")))
+        .all()
+    )
+    reminders = {r.person: r for r in db.query(LendingReminder).all()}
+
+    balances: dict[str, dict] = {}
+    for t in rows:
+        person = t.counterparty or t.merchant or "Someone"
+        b = balances.setdefault(person, {"person": person, "lent": 0.0, "repaid": 0.0})
+        if t.kind == "lend":
+            b["lent"] += t.amount
+        else:
+            b["repaid"] += t.amount
+
+    out = []
+    for person, b in balances.items():
+        outstanding = round(b["lent"] - b["repaid"], 2)
+        reminder = reminders.get(person)
+        out.append({
+            "person": person,
+            "lent": round(b["lent"], 2),
+            "repaid": round(b["repaid"], 2),
+            "outstanding": outstanding,
+            "next_reminder_at": (reminder.next_reminder_at.isoformat() + "Z") if reminder else None,
+        })
+    return sorted(out, key=lambda x: -x["outstanding"])
+
+
+@api.post("/lending/{person}/snooze")
+def snooze_lending_reminder(person: str, days: int = Query(default=3, ge=1, le=90), db: Session = Depends(get_db)):
+    next_at = utc_now_naive() + timedelta(days=days)
+    reminder = db.get(LendingReminder, person)
+    if reminder:
+        reminder.next_reminder_at = next_at
+        reminder.snooze_days = days
+    else:
+        db.add(LendingReminder(person=person, next_reminder_at=next_at, snooze_days=days))
+    db.commit()
+    return {"status": "ok", "person": person, "next_reminder_at": next_at.isoformat() + "Z"}
+
+
+@api.delete("/lending/{person}/reminder")
+def clear_lending_reminder(person: str, db: Session = Depends(get_db)):
+    reminder = db.get(LendingReminder, person)
+    if reminder:
+        db.delete(reminder)
+        db.commit()
+    return {"status": "ok", "person": person}
 
 
 app.include_router(api)

@@ -14,7 +14,7 @@ client = Anthropic(api_key=_api_key) if _api_key else None
 CATEGORIES = [
     "Food & Dining", "Groceries", "Transport", "Shopping",
     "Bills & Utilities", "Entertainment", "Health", "Rent",
-    "Investment", "Transfer", "Income", "Other",
+    "Investment", "Transfer", "Income", "Lending", "Other",
 ]
 
 # Fast, free, obvious matches -> skip the AI call entirely for common merchants.
@@ -129,6 +129,23 @@ def parse_sms(text: str) -> dict:
     }
 
 
+_UPI_ID_RE = re.compile(r"^[\w.\-]+@[\w.\-]+$")
+
+
+def payee_key_for(merchant: str) -> str | None:
+    """Stable lookup key for 'who is this' — a real UPI id when the extracted
+    merchant looks like one (arjun@ybl), or a normalised `name:<text>` key for
+    a card swipe with no VPA (name:xyz traders). Mirrors identityKeyFor from
+    the client-side prototype — same reasoning: a card swipe has no VPA to key
+    off, but the merchant name is still stable across repeat visits."""
+    if not merchant or merchant == "Unknown":
+        return None
+    if _UPI_ID_RE.match(merchant):
+        return merchant.lower()
+    normalized = re.sub(r"\s+", " ", merchant).strip().lower()
+    return f"name:{normalized}" if len(normalized) >= 2 else None
+
+
 def _rule_match(merchant: str, raw_text: str) -> str | None:
     haystack = f"{merchant} {raw_text}".lower()
     for key, category in OBVIOUS_MERCHANTS.items():
@@ -138,18 +155,25 @@ def _rule_match(merchant: str, raw_text: str) -> str | None:
 
 
 def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
-    """Returns {'category': str, 'needs_review': bool}. Cheap path first, AI second."""
+    """Returns {'category', 'needs_review', 'source'}. Cheap path first, AI second.
+
+    `source` tells the caller *why* — main.py needs this to decide whether to
+    also ask "who is this / merchant, friend, wallet, or my own account?":
+    a hardcoded rule match is a definitively known brand (never ask), but an
+    AI-confident guess on a brand-new counterparty still might be a friend or
+    a wallet Claude has no way to know about — see _ingest()'s payee handling.
+    """
     hit = _rule_match(merchant, raw_text)
     if hit:
-        return {"category": hit, "needs_review": False}
+        return {"category": hit, "needs_review": False, "source": "rule"}
 
     if direction == "credit":
         # Money coming in isn't spending — don't burn an AI call or a review slot.
-        return {"category": "Income", "needs_review": False}
+        return {"category": "Income", "needs_review": False, "source": "income"}
 
     if client is None:
         # No API key configured — park it in the review queue rather than guessing.
-        return {"category": "Uncategorized", "needs_review": True}
+        return {"category": "Uncategorized", "needs_review": True, "source": "no_ai"}
 
     try:
         response = client.messages.create(
@@ -187,7 +211,12 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
         category = parsed.get("category", "Other")
         if category not in CATEGORIES:
             category = "Other"
-        return {"category": category, "needs_review": not parsed.get("confident", False)}
+        confident = parsed.get("confident", False)
+        return {
+            "category": category,
+            "needs_review": not confident,
+            "source": "ai_confident" if confident else "ai_unsure",
+        }
     except Exception:
         # Never let a categorization failure lose the transaction.
-        return {"category": "Uncategorized", "needs_review": True}
+        return {"category": "Uncategorized", "needs_review": True, "source": "ai_error"}
