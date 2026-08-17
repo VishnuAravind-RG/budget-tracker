@@ -21,8 +21,18 @@ class SMSPayload(BaseModel):
 class ManualTransaction(BaseModel):
     amount: float = Field(gt=0)
     direction: str = "debit"
-    category: str
+    # Optional, not required: for kind="friend"/"wallet"/"self" the frontend
+    # doesn't show a category picker at all (Lending/Transfer are applied
+    # automatically) — a required field here would have forced the leftover
+    # value from a hidden dropdown onto every lending entry.
+    category: Optional[str] = None
     merchant: Optional[str] = Field(default=None, max_length=60)
+    # What this actually is — same vocabulary as TransactionClassify, so a
+    # manually-logged "sent to a friend" is tracked as lending (not spending)
+    # exactly like an SMS-ingested one, not just categorised. "expense" (the
+    # default) preserves the old plain-expense-or-income behaviour untouched.
+    kind: str = "expense"
+    counterparty: Optional[str] = Field(default=None, max_length=80)
 
     @field_validator("direction")
     @classmethod
@@ -34,8 +44,23 @@ class ManualTransaction(BaseModel):
 
     @field_validator("category")
     @classmethod
-    def _category(cls, v: str) -> str:
-        return _validate_category(v)
+    def _category(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_category(v) if v is not None else v
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        if v not in ("expense", "friend", "wallet", "self"):
+            raise ValueError("kind must be one of: expense, friend, wallet, self")
+        return v
+
+
+class MerchantUpdate(BaseModel):
+    """Renames a transaction's merchant/note in place — e.g. filling in a
+    location-resolved place name after the fact, without touching its
+    category, kind, or review status the way /classify would."""
+
+    merchant: str = Field(min_length=1, max_length=80)
 
 
 class CategoryUpdate(BaseModel):

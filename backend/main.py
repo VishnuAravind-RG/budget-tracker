@@ -25,6 +25,7 @@ from schemas import (  # noqa: E402
     ImportRequest,
     LendingBalance,
     ManualTransaction,
+    MerchantUpdate,
     MileageOut,
     SMSPayload,
     TodoIn,
@@ -68,6 +69,25 @@ DEDUPE_WINDOW = timedelta(seconds=120)
 def _resolve_month(month: int | None, year: int | None) -> tuple[int, int]:
     now = local_now()
     return month or now.month, year or now.year
+
+
+def _resolve_kind(kind_choice: str, direction: str, label: str, requested_category: str | None, fallback_category: str) -> tuple[str, str, str | None]:
+    """Turns a 'what is this?' answer (expense/friend/wallet/self) plus the
+    money's actual direction into (real kind, category, counterparty).
+    Shared by classify_transaction() (the Review tab's answer to an
+    SMS-ingested transaction) and add_manual() (the same answer, asked
+    up front for a manually-logged one) — one place decides lend vs.
+    repayment, top-up vs. transfer, so the two entry points can't drift
+    apart on this.
+    """
+    is_debit = direction == "debit"
+    if kind_choice == "friend":
+        return ("lend" if is_debit else "repayment"), (requested_category or "Lending"), label
+    if kind_choice == "wallet":
+        return ("topup" if is_debit else "transfer"), (requested_category or "Transfer"), None
+    if kind_choice == "self":
+        return "transfer", (requested_category or "Transfer"), None
+    return ("expense" if is_debit else "income"), (requested_category or fallback_category), None
 
 
 # ---------------------------------------------------------------- transactions
@@ -170,14 +190,19 @@ def _ingest(text: str, db: Session):
 
 @api.post("/transactions/manual", response_model=TransactionOut)
 def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
+    label = payload.merchant or ("Someone" if payload.kind == "friend" else "Transaction")
+    fallback_category = payload.category or "Uncategorized"
+    kind, category, counterparty = _resolve_kind(payload.kind, payload.direction, label, payload.category, fallback_category)
+
     txn = Transaction(
-        merchant=payload.merchant,
+        merchant=label if payload.kind != "expense" else payload.merchant,
         amount=payload.amount,
         direction=payload.direction,
-        category=payload.category,
+        category=category,
         source="manual",
         needs_review=False,
-        kind="income" if payload.direction == "credit" else "expense",
+        kind=kind,
+        counterparty=counterparty,
     )
     db.add(txn)
     db.commit()
@@ -222,6 +247,20 @@ def update_category(txn_id: int, payload: CategoryUpdate, db: Session = Depends(
     return txn
 
 
+@api.patch("/transactions/{txn_id}/merchant", response_model=TransactionOut)
+def update_merchant(txn_id: int, payload: MerchantUpdate, db: Session = Depends(get_db)):
+    """Renames just the merchant/note — used to fill in a location-resolved
+    place name after adding an expense with no merchant typed, without
+    touching category/kind/review status."""
+    txn = db.get(Transaction, txn_id)
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    txn.merchant = payload.merchant
+    db.commit()
+    db.refresh(txn)
+    return txn
+
+
 @api.patch("/transactions/{txn_id}/classify", response_model=TransactionOut)
 def classify_transaction(txn_id: int, payload: TransactionClassify, db: Session = Depends(get_db)):
     """The Review tab's 'who is this?' answer: merchant / friend / wallet / my
@@ -232,26 +271,10 @@ def classify_transaction(txn_id: int, payload: TransactionClassify, db: Session 
     if not txn:
         raise HTTPException(404, "Transaction not found")
 
-    is_debit = txn.direction == "debit"
     label = payload.label or txn.merchant or "Transaction"
-
-    if payload.kind == "friend":
-        txn.kind = "lend" if is_debit else "repayment"
-        txn.counterparty = label
-        txn.category = payload.category or "Lending"
-    elif payload.kind == "wallet":
-        txn.kind = "topup" if is_debit else "transfer"
-        txn.counterparty = None
-        txn.category = payload.category or "Transfer"
-    elif payload.kind == "self":
-        txn.kind = "transfer"
-        txn.counterparty = None
-        txn.category = payload.category or "Transfer"
-    else:  # "expense" — a real merchant/purchase (or, for a credit, income)
-        txn.kind = "income" if not is_debit else "expense"
-        txn.counterparty = None
-        txn.category = payload.category or txn.category
-
+    txn.kind, txn.category, txn.counterparty = _resolve_kind(
+        payload.kind, txn.direction, label, payload.category, txn.category
+    )
     txn.merchant = label
     txn.needs_review = False
 

@@ -76,6 +76,8 @@ export const api = {
   // and, by default, remembered so the same counterparty is never asked again.
   classifyTransaction: (id, payload) =>
     request(`/transactions/${id}/classify`, { method: 'PATCH', body: payload }),
+  renameMerchant: (id, merchant) =>
+    request(`/transactions/${id}/merchant`, { method: 'PATCH', body: { merchant } }),
   deleteTransaction: (id) => request(`/transactions/${id}`, { method: 'DELETE' }),
   summary: (month, year) => request(`/budget/summary${qs({ month, year })}`),
   trend: (month, year) => request(`/stats/daily${qs({ month, year })}`),

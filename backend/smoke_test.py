@@ -361,6 +361,61 @@ check(
     {"trend_total": trend_total, "days_with_spend": [d for d in june_trend["days"] if d["spent"] > 0]},
 )
 
+# --- merchant rename (location-resolved place name after the fact) -----------
+loc_txn = client.post(
+    "/transactions/manual",
+    json={"amount": 220, "direction": "debit", "category": "Food & Dining"},
+    headers=AUTH,
+).json()
+check("transaction added with no merchant", loc_txn["merchant"] is None, loc_txn)
+
+renamed = client.patch(
+    f"/transactions/{loc_txn['id']}/merchant", json={"merchant": "St. Joseph's Indian High School"}, headers=AUTH
+).json()
+check("merchant renamed", renamed["merchant"] == "St. Joseph's Indian High School", renamed)
+check("category/kind untouched by a merchant rename", renamed["category"] == "Food & Dining" and renamed["kind"] == "expense", renamed)
+
+check("renaming a missing transaction -> 404", client.patch("/transactions/999999/merchant", json={"merchant": "x"}, headers=AUTH).status_code == 404)
+check("empty merchant name rejected", client.patch(f"/transactions/{loc_txn['id']}/merchant", json={"merchant": ""}, headers=AUTH).status_code == 422)
+
+# --- manually logging money sent to a friend (not via SMS) --------------------
+before_summary = client.get("/budget/summary", headers=AUTH).json()
+spent_before_manual_lend = before_summary["total_spent"]
+
+lend_manual = client.post(
+    "/transactions/manual",
+    json={"amount": 1500, "direction": "debit", "kind": "friend", "merchant": "Rahul"},
+    headers=AUTH,
+).json()
+check("manually-logged loan gets kind=lend, not expense", lend_manual["kind"] == "lend", lend_manual)
+check("counterparty recorded from the merchant field", lend_manual["counterparty"] == "Rahul", lend_manual)
+check("category defaults to Lending, not whatever category was left selected", lend_manual["category"] == "Lending", lend_manual)
+
+after_summary = client.get("/budget/summary", headers=AUTH).json()
+check(
+    "manual lending does NOT move total_spent",
+    after_summary["total_spent"] == spent_before_manual_lend,
+    {"before": spent_before_manual_lend, "after": after_summary["total_spent"]},
+)
+
+rahul_balance = next((p for p in client.get("/lending", headers=AUTH).json() if p["person"] == "Rahul"), None)
+check("Rahul shows up in /lending from a manual entry alone", rahul_balance is not None and rahul_balance["lent"] == 1500.0, rahul_balance)
+
+# A manually-logged wallet top-up should behave the same way.
+topup_manual = client.post(
+    "/transactions/manual", json={"amount": 300, "direction": "debit", "kind": "wallet", "merchant": "Paytm"}, headers=AUTH
+).json()
+check("manually-logged wallet top-up gets kind=topup", topup_manual["kind"] == "topup", topup_manual)
+check("wallet top-up category defaults to Transfer", topup_manual["category"] == "Transfer", topup_manual)
+
+# Ordinary manual expense still behaves exactly as before this change.
+plain_manual = client.post(
+    "/transactions/manual", json={"amount": 99, "direction": "debit", "category": "Shopping"}, headers=AUTH
+).json()
+check("plain manual expense unaffected by the kind field's addition", plain_manual["kind"] == "expense" and plain_manual["category"] == "Shopping", plain_manual)
+
+check("invalid manual kind rejected", client.post("/transactions/manual", json={"amount": 10, "direction": "debit", "kind": "bogus"}, headers=AUTH).status_code == 422)
+
 print()
 if failures:
     print(f"{len(failures)} FAILED: {failures}")

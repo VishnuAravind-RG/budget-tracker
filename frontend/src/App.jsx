@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 
 import { api, clearToken, getToken, setToken } from './api.js'
 import { monthName } from './format.js'
+import { captureLocationOnce, getLocationConsent } from './location.js'
 import AddExpense from './components/AddExpense.jsx'
 import Budgets from './components/Budgets.jsx'
 import Dashboard from './components/Dashboard.jsx'
@@ -144,10 +145,25 @@ export default function App() {
   }
 
   async function addManual(payload) {
-    await api.addManual(payload)
+    const created = await api.addManual(payload)
     setToast('Added')
     setTab('home')
     refresh()
+
+    // Location is opt-in and never blocks the add above — it resolves in the
+    // background afterward, only filling in a merchant name if none was
+    // typed, only for an actual shop expense (never for lending/wallet/
+    // transfer, where a nearby place name isn't the answer to anything),
+    // and only once consent was explicitly given.
+    if (payload.kind === 'expense' && !payload.merchant && getLocationConsent() === 'granted') {
+      captureLocationOnce().then((place) => {
+        if (!place?.placeName) return
+        api.renameMerchant(created.id, place.placeName).then(() => {
+          setToast(`Detected: ${place.placeName}`)
+          refresh()
+        })
+      })
+    }
   }
 
   async function saveBudget(category, limit) {

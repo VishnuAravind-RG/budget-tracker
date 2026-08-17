@@ -76,3 +76,7 @@ export const AccountIcon = (p) => (
 export const BellIcon = (p) => (
   <svg {...base} width="14" height="14" {...p}><path d="M6 9.5a6 6 0 0 1 12 0c0 4 1.5 5.5 1.5 5.5h-15S6 13.5 6 9.5Z" /><path d="M10 18a2 2 0 0 0 4 0" /></svg>
 )
+
+export const PinIcon = (p) => (
+  <svg {...base} width="14" height="14" {...p}><path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21Z" /><circle cx="12" cy="9.5" r="2.3" /></svg>
+)
