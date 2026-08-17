@@ -384,16 +384,20 @@ main {
 .field label { font-size: 13px; font-weight: 500; color: var(--text-2); }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   width: 100%;
   padding: 12px 13px;
   background: var(--surface);
   border: 1px solid var(--axis);
   border-radius: 10px;
   outline: none;
+  font-family: inherit;
+  resize: vertical;
 }
 .field input:focus,
-.field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.field select:focus,
+.field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
 .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
@@ -544,6 +548,30 @@ main {
   outline: none;
 }
 .who-detail input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ------------------------------------------------------------------ scan --- */
+
+.scan-drop {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 20px;
+  border: 1.5px dashed var(--axis);
+  border-radius: 12px;
+  color: var(--text-2);
+  font-size: 14px;
+  cursor: pointer;
+}
+.scan-drop:hover { border-color: var(--accent); color: var(--accent); }
+
+.scan-preview {
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  border-radius: 12px;
+  background: var(--surface-2);
+}
 
 /* -------------------------------------------------------------- location --- */
 

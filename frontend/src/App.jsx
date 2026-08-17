@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, clearToken, getToken, setToken } from './api.js'
 import { monthName } from './format.js'
 import { captureLocationOnce, getLocationConsent } from './location.js'
-import AddExpense from './components/AddExpense.jsx'
+import AddTransaction from './components/AddTransaction.jsx'
 import Budgets from './components/Budgets.jsx'
 import Dashboard from './components/Dashboard.jsx'
 import Login from './components/Login.jsx'
@@ -215,7 +215,17 @@ export default function App() {
           <Review items={review} categories={categories} onClassify={classify} />
         )}
 
-        {tab === 'add' && <AddExpense categories={categories} onAdd={addManual} />}
+        {tab === 'add' && (
+          <AddTransaction
+            categories={categories}
+            onAdd={addManual}
+            onScanned={() => {
+              setToast('Added')
+              setTab('home')
+              refresh()
+            }}
+          />
+        )}
 
         {tab === 'history' && (
           <Transactions

@@ -6,4 +6,5 @@ pydantic==2.10.4
 python-dotenv==1.0.1
 anthropic==0.122.0
 tzdata>=2024.1
+python-multipart==0.0.20
 

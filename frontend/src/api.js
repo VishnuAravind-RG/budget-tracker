@@ -20,15 +20,19 @@ export class ApiError extends Error {
 
 async function request(path, { method = 'GET', body, token } = {}) {
   const auth = token ?? getToken()
+  // FormData (image upload) must NOT be JSON-stringified and must NOT get an
+  // explicit Content-Type — the browser sets multipart/form-data with the
+  // right boundary itself; setting it by hand breaks the boundary.
+  const isForm = body instanceof FormData
   let response
   try {
     response = await fetch(BASE + path, {
       method,
       headers: {
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...(body && !isForm ? { 'Content-Type': 'application/json' } : {}),
         ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
       },
-      body: body ? JSON.stringify(body) : undefined,
+      body: isForm ? body : body ? JSON.stringify(body) : undefined,
     })
   } catch {
     throw new ApiError("Can't reach the server. Check your connection.", 0)
@@ -79,6 +83,16 @@ export const api = {
   renameMerchant: (id, merchant) =>
     request(`/transactions/${id}/merchant`, { method: 'PATCH', body: { merchant } }),
   deleteTransaction: (id) => request(`/transactions/${id}`, { method: 'DELETE' }),
+  aiStatus: () => request('/ai/status'),
+  // `note` is the user's correction/context alongside the photo — e.g.
+  // "this was for a friend's birthday, categorise as Entertainment" —
+  // treated server-side as authoritative over what the image alone shows.
+  scanReceipt: (file, note) => {
+    const form = new FormData()
+    form.append('image', file)
+    if (note) form.append('note', note)
+    return request('/ai/scan-receipt', { method: 'POST', body: form })
+  },
   summary: (month, year) => request(`/budget/summary${qs({ month, year })}`),
   trend: (month, year) => request(`/stats/daily${qs({ month, year })}`),
   budgetLimits: () => request('/budget/limits'),

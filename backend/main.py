@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # utf-8-sig so a .env saved by a Windows editor (BOM) still parses.
 load_dotenv(encoding="utf-8-sig")
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request  # noqa: E402
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from sqlalchemy import func  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
@@ -16,6 +16,7 @@ from auth import require_token  # noqa: E402
 from categorizer import CATEGORIES, categorize, parse_sms, payee_key_for  # noqa: E402
 from db import get_db, init_db  # noqa: E402
 from models import Budget, FuelFill, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
+from receipt_scan import ReceiptScanError, gemini_configured, scan_receipt  # noqa: E402
 from schemas import (  # noqa: E402
     BudgetSet,
     BudgetSummary,
@@ -203,6 +204,61 @@ def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
         needs_review=False,
         kind=kind,
         counterparty=counterparty,
+    )
+    db.add(txn)
+    db.commit()
+    db.refresh(txn)
+    return txn
+
+
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — generous for a phone photo, small enough to stay fast
+
+
+@api.get("/ai/status")
+def ai_status():
+    """Lets the frontend hide the photo-scan UI entirely when no key is set,
+    instead of showing a button that always fails."""
+    return {"receipt_scan_available": gemini_configured()}
+
+
+@api.post("/ai/scan-receipt", response_model=TransactionOut)
+async def scan_receipt_endpoint(
+    image: UploadFile = File(...),
+    note: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    """Reads a photo of a receipt/payment screenshot and books it as a
+    transaction. `note` is free text alongside the image — e.g. "this was
+    for a friend's birthday, categorise as Entertainment" — treated as
+    authoritative context, the same way a correction to a human assistant
+    would be. Booked with needs_review=True whenever the model itself wasn't
+    confident, exactly like an SMS-ingested transaction the AI is unsure
+    about — never silently guessed into a number that skews a total."""
+    if not gemini_configured():
+        raise HTTPException(503, "Photo scanning isn't set up (no GEMINI_API_KEY on the server)")
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(422, "Empty image")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, "Image too large (max 8MB)")
+
+    try:
+        result = scan_receipt(image_bytes, image.content_type or "image/jpeg", note)
+    except ReceiptScanError as e:
+        raise HTTPException(502, str(e)) from e
+
+    if result["amount"] <= 0:
+        raise HTTPException(422, "Couldn't read an amount from that image — try a clearer photo")
+
+    txn = Transaction(
+        merchant=result["merchant"] or "Scanned receipt",
+        amount=result["amount"],
+        direction=result["direction"],
+        category=result["category"],
+        source="ai_image",
+        needs_review=not result["confident"],
+        kind="income" if result["direction"] == "credit" else "expense",
     )
     db.add(txn)
     db.commit()

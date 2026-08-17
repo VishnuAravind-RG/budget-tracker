@@ -416,6 +416,23 @@ check("plain manual expense unaffected by the kind field's addition", plain_manu
 
 check("invalid manual kind rejected", client.post("/transactions/manual", json={"amount": 10, "direction": "debit", "kind": "bogus"}, headers=AUTH).status_code == 422)
 
+# --- receipt photo scanning (no GEMINI_API_KEY set in this test env, deliberately —
+# same reasoning as skipping ANTHROPIC_API_KEY above: free, deterministic, offline) --
+status = client.get("/ai/status", headers=AUTH).json()
+check("ai/status reports unavailable with no key set", status["receipt_scan_available"] is False, status)
+
+fake_image = client.post(
+    "/ai/scan-receipt",
+    files={"image": ("receipt.jpg", b"\xff\xd8\xff\xe0not-a-real-jpeg", "image/jpeg")},
+    headers=AUTH,
+)
+check("scan-receipt refuses cleanly with no key, not a 500", fake_image.status_code == 503, fake_image.text)
+
+empty_image = client.post("/ai/scan-receipt", files={"image": ("x.jpg", b"", "image/jpeg")}, headers=AUTH)
+check("scan-receipt still checks key before validating the file", empty_image.status_code == 503, empty_image.text)
+
+check("scan-receipt needs auth", client.post("/ai/scan-receipt", files={"image": ("x.jpg", b"123", "image/jpeg")}).status_code == 401)
+
 print()
 if failures:
     print(f"{len(failures)} FAILED: {failures}")
