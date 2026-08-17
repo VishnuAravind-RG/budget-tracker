@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import timedelta
 
@@ -109,7 +110,14 @@ async def ingest_sms_raw(request: Request, db: Session = Depends(get_db)):
     text = (await request.body()).decode("utf-8", errors="replace").strip()
     if not text:
         raise HTTPException(422, "Empty body")
-    return _ingest(text[:2000], db)
+    # _ingest() can call out to Claude synchronously (categorizer.py) when
+    # ANTHROPIC_API_KEY is set. This route is `async def` (it awaits
+    # request.body() above), so unlike a plain `def` route — which FastAPI
+    # runs in a thread pool automatically — a blocking call here runs
+    # directly on the event loop and freezes every other request, including
+    # /health, for as long as the call takes. Same bug class that took the
+    # server down via /ai/scan-receipt; fixed there and here together.
+    return await asyncio.to_thread(_ingest, text[:2000], db)
 
 
 def _ingest(text: str, db: Session):
@@ -244,7 +252,15 @@ async def scan_receipt_endpoint(
         raise HTTPException(413, "Image too large (max 8MB)")
 
     try:
-        result = scan_receipt(image_bytes, image.content_type or "image/jpeg", note)
+        # scan_receipt() blocks on urllib for up to 30s (longer with retries
+        # during a Gemini demand spike) — this endpoint is async, so running
+        # it directly freezes the single-worker event loop, and with it every
+        # other request including /health, for the same duration. That's what
+        # actually took the server down in testing: Render's health check
+        # timed out at 5s while a scan was in flight and restarted the
+        # instance. asyncio.to_thread() runs the blocking call off the event
+        # loop so /health keeps responding no matter how long Gemini takes.
+        result = await asyncio.to_thread(scan_receipt, image_bytes, image.content_type or "image/jpeg", note)
     except ReceiptScanError as e:
         raise HTTPException(502, str(e)) from e
 
