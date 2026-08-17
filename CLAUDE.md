@@ -5,10 +5,13 @@ bearer-token auth. Bank SMS auto-ingested via a MacroDroid webhook,
 categorized via rules + a Claude fallback, tracked against monthly budgets.
 
 **This file is a handoff note for continuing work in a fresh Claude Code
-session.** Written 2026-08-16 after the initial build and deployment, so a
-session with no memory of that conversation can get oriented fast. Update it
-as things change — it should stay a live "state of the world" doc, not a
-frozen snapshot.
+session.** Written 2026-08-16 after the initial build and deployment; updated
+2026-08-17 after a second session (working from a *different* local clone at
+`C:\bt-dev\repo` on the owner's office laptop — that session initially built
+an unrelated standalone local-only prototype before discovering this repo
+already existed and was live, then ported the useful ideas in properly). A
+session with no memory of either conversation should be able to get oriented
+fast from this file alone — keep updating it, don't let it go stale.
 
 ## What's live right now
 
@@ -52,12 +55,47 @@ their phone forwards bank SMS to `/sms/ingest`.
   prod), `timeutil.py` (timestamps stored as naive UTC; month boundaries
   computed in `TZ_NAME` so late-night spends land in the right month).
 - `frontend/` — React 18 + Vite. No chart/UI library — the trend line and
-  budget meters are hand-rolled SVG/CSS (~53KB gzipped total). Five tabs:
-  Home (dashboard), Review (AI-unsure transactions), Add (manual entry),
-  History (all transactions), Budgets (limits + sign-out). PWA: manifest +
-  service worker (network-first with offline-shell fallback).
-- `backend/smoke_test.py` — ~60 end-to-end checks (auth, SMS parsing,
-  dedupe, budget math, timezone handling). Run it after backend changes.
+  budget meters are hand-rolled SVG/CSS (~57KB gzipped total). Seven tabs:
+  Home (dashboard, now includes a lending card), Review ("who is this?" —
+  see below), Add (manual entry), History (all transactions), Fuel
+  (vehicles/mileage), To-do (plain checklist), Budgets (limits + sign-out).
+  PWA: manifest + service worker (network-first with offline-shell
+  fallback). The tabbar is horizontally scrollable, not a fixed grid — it
+  was a 5-column grid sized for exactly 5 tabs; don't revert that when
+  adding a tab, it'll squish everything.
+- `backend/smoke_test.py` — ~96 end-to-end checks (auth, SMS parsing,
+  dedupe, budget math, timezone handling, payee memory, kind-aware
+  budgeting, fuel mileage, to-dos, lending). Run it after backend changes.
+- `backend/test_migration.py` — simulates an old-schema database with real
+  rows already in it, then boots the current code against that same file.
+  Run this specifically before any future model change that touches an
+  *existing* table/column — `Base.metadata.create_all()` only creates
+  missing tables, it never alters one that's already live, so a plain field
+  addition needs a matching `_ensure_columns()` entry in `db.py` or it 500s
+  in production. This is not optional ceremony; it already caught a real
+  bug once (see below).
+
+## Money-movement kinds — added 2026-08-17, this is load-bearing
+
+`Transaction.kind` is what keeps the numbers honest: `expense`, `income`,
+`transfer`, `topup`, `lend`, `repayment`. **Only `expense` counts as
+spending** — `budget_summary()` and `daily_trend()` in `main.py` filter on
+`kind`, not `direction`. Loading a wallet or lending money to a friend is a
+real debit but not a purchase; counting it as one is exactly the kind of bug
+this field exists to prevent. Don't "simplify" this back to direction-based
+filtering.
+
+**Payee memory** (`Payee` table, `backend/categorizer.py`'s `payee_key_for`):
+the first time an SMS involves a counterparty with no rule match — a UPI id,
+or a card swipe with no VPA at all — it lands in Review asking "who is this:
+a shop / a person / my wallet / my own account?", *even if Claude was
+confident about the category*, because neither rules nor the AI can tell "OK
+but is this actually lending" from a category guess alone. Answering is
+remembered by `payee_key` (the UPI id, or `name:<merchant text>` for a
+card swipe) and never asked again for that same counterparty. The endpoint
+is `PATCH /transactions/{id}/classify`, not the older plain
+`/category` PATCH — the History tab still uses the simple one for
+re-categorising an already-resolved transaction; Review uses `/classify`.
 
 ## Why these specific hosting choices
 
@@ -109,6 +147,81 @@ The explicit requirement was free-forever, no card, anywhere.
   stored as real transactions, salary credits incorrectly queued for AI
   review instead of auto-filing as `Income`, and a merchant-name regex that
   missed the common "debited **for** X" SMS phrasing.
+
+## Fixed in the 2026-08-17 session (payee memory / fuel / to-dos / lending)
+
+- **The actual migration bug `test_migration.py` was written to catch**: the
+  first draft of `_ensure_columns()` backfilled the new `kind` column with a
+  flat `'expense'` default for every pre-existing row. That's wrong for any
+  row that was a `credit` — a historical salary or refund would have been
+  silently relabelled as spending, inflating every past month's total the
+  next time it was viewed. Fixed to backfill from the existing `direction`
+  column instead (`debit`→`expense`, `credit`→`income`) — a `CASE` expression
+  in the `UPDATE`, not a flat default. `test_migration.py` asserts this
+  exact distinction and will fail loudly if it regresses.
+- **Payee-kind vocabulary mismatch**: `classify_transaction()` stores
+  `Payee.kind` using `TransactionClassify`'s vocabulary (`expense` /
+  `friend` / `wallet` / `self`), but `_ingest()`'s lookup was checking for
+  `known.kind == "merchant"` — a value that's never actually stored anywhere.
+  Silent bug: a remembered merchant payee would skip Review correctly (the
+  `if known:` branch matched) but its category would never get applied,
+  landing every repeat transaction in `Uncategorized`. Caught by
+  `smoke_test.py`'s "repeat card-swipe merchant gets its remembered
+  category" check before this ever reached production. Fixed by matching
+  `"expense"`, and documented in a comment on that line so it doesn't
+  regress — if you're renaming either vocabulary, grep for the other one
+  first.
+- **Frontend doesn't know about SMS that arrive while the tab is already
+  open**: `App.jsx`'s `refresh()` only ran on mount and after the app's own
+  actions (classify/add/delete/save budget) — a real MacroDroid SMS landing
+  in the background while the PWA sat open wouldn't show up until something
+  else triggered a refetch. Added a `visibilitychange`/`focus` listener that
+  re-fetches whenever the tab regains focus, so reopening the app (the
+  normal way you'd notice a new SMS) is enough — no polling while
+  backgrounded.
+- Windows console `UnicodeEncodeError` on the ₹ symbol in `smoke_test.py`'s
+  own `print()` output (cp1252 default codepage) — added
+  `sys.stdout.reconfigure(encoding="utf-8")` at the top. Doesn't affect the
+  Linux deploy target; only mattered for running the suite locally on
+  Windows, but worth keeping so that keeps working too.
+
+## Verification before this was pushed
+
+Both `smoke_test.py` (96 checks) and `test_migration.py` (17 checks) passed
+locally against SQLite before anything was pushed. After pushing: watched the
+Render deploy via the Render API until `status: live`, then re-verified
+against the **real production API and Postgres database** — `/health`,
+`/categories` (confirms the new `Lending` category deployed), `/vehicles`
+(confirms the three-vehicle seed ran), and a manual add-then-delete round
+trip to confirm the `kind` field works end-to-end in production, not just
+locally. Existing production data (four budget limits, ₹12,000 total) was
+confirmed intact after the migration — the transactions table itself was
+empty at deploy time (no real SMS had landed yet), so there was nothing at
+risk there specifically, but the migration path is what protects whatever
+lands from here on. Frontend: confirmed the `deploy-frontend.yml` GitHub
+Action ran and succeeded automatically (it triggers on `frontend/**`
+changes), then fetched the live bundle from Vercel and confirmed its byte
+size matched the local build exactly, plus grepped for new-feature strings
+(`"Log a fill-up"`, `"Money lent out"`) to confirm it wasn't a stale cache.
+
+## Open questions for the owner — not this session's call to make
+
+- **The transactions table was empty at the start of this session.** Worth
+  confirming next time you talk to the owner: is MacroDroid actually
+  configured and forwarding SMS yet, or is that still a pending phone-side
+  step from the original setup? The backend/frontend are both ready either
+  way, but "is it actually capturing real spends" is a different question
+  from "is it deployed."
+- **`ANTHROPIC_API_KEY` is still unset.** Unrecognised merchants (that also
+  aren't a brand-new payee needing the who-is-this prompt) land in
+  Uncategorized/needs_review rather than getting an AI guess. Fine as a
+  default; ask before adding a paid key on the owner's behalf.
+- A **native Android app for reading SMS directly** came up as an idea in a
+  parallel local-prototype conversation the same day — deliberately *not*
+  pursued here, because MacroDroid already does this without any app-store
+  presence, code signing, or maintenance burden. Don't build one unless the
+  owner explicitly says MacroDroid isn't sufficient for some concrete
+  reason.
 
 ## Known non-issues — don't "fix" these
 
