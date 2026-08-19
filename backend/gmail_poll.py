@@ -116,9 +116,30 @@ def _get(url: str, access_token: str) -> dict:
         raise GmailPollError(f"Couldn't reach Gmail: {e.reason}") from e
 
 
+def _html_to_text(html: str) -> str:
+    """Crude but effective: strip whatever isn't visible text.
+
+    Real bank-alert emails (HDFC's included) are often dense, image- and
+    table-heavy marketing templates with no text/plain part at all — just
+    regexing out `<...>` tags leaves entire <style> block CSS and hundreds
+    of empty <td></td> table cells behind as "text". That padding easily
+    pushes the actual message past any reasonable truncation length before
+    parse_sms() ever sees it, which is exactly what silently broke the
+    first live poll: real transaction alerts came back "not a transaction"
+    because the amount was buried a few thousand characters in, past
+    fetch_new_alerts()'s 2000-char cutoff. Stripping <style>/<script>/<head>
+    *content* (not just their tags) and collapsing the remaining whitespace
+    keeps the real message near the front where it belongs.
+    """
+    html = re.sub(r"(?is)<(style|script|head)\b.*?</\1>", " ", html)
+    html = re.sub(r"<[^>]+>", " ", html)
+    html = html.replace("&nbsp;", " ")
+    return re.sub(r"\s+", " ", html).strip()
+
+
 def _extract_plain_text(payload: dict) -> str:
     """Gmail bodies are base64url in a nested MIME tree; walk it for the
-    first text/plain part, falling back to text/html stripped of tags."""
+    first text/plain part, falling back to text/html reduced to visible text."""
 
     def walk(part):
         mime = part.get("mimeType", "")
@@ -131,7 +152,7 @@ def _extract_plain_text(payload: dict) -> str:
                 return found
         if mime == "text/html" and data:
             html = base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-            return re.sub(r"<[^>]+>", " ", html)
+            return _html_to_text(html)
         return None
 
     return walk(payload) or ""
