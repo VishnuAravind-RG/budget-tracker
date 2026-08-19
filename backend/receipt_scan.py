@@ -17,7 +17,7 @@ import urllib.request
 
 from categorizer import CATEGORIES
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 _api_key = os.getenv("GEMINI_API_KEY", "").strip()
 
 ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"

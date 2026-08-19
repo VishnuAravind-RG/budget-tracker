@@ -26,7 +26,7 @@ _gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
 # "GenerateRequestsPerDayPerProjectPerModel-FreeTier ... quotaValue: 20".
 # Pinned to an established flash model with a real free allowance instead —
 # "latest" auto-upgrading to whatever's newest is exactly how this broke.
-_gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 _GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_gemini_model}:generateContent"
 
 CATEGORIES = [
