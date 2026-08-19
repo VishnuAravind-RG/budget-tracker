@@ -233,14 +233,6 @@ export default function App() {
           <AddTransaction
             categories={categories}
             onAdd={addManual}
-            onScanned={() => {
-              setToast('Added')
-              // Same reasoning as addManual() above — a photo scan can take
-              // up to ~30s (Gemini vision), a much wider window for the user
-              // to have already navigated elsewhere while it was running.
-              setTab((current) => (current === 'add' ? 'home' : current))
-              refresh()
-            }}
             onPasted={(txn) => {
               // A pasted alert can land needing review (unrecognised payee)
               // rather than being confirmed outright — say so either way.

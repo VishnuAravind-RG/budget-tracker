@@ -4,7 +4,7 @@ import AddExpense from './AddExpense.jsx'
 import ScanReceipt from './ScanReceipt.jsx'
 import PasteAlert from './PasteAlert.jsx'
 
-export default function AddTransaction({ categories, onAdd, onScanned, onPasted }) {
+export default function AddTransaction({ categories, onAdd, onPasted }) {
   const [mode, setMode] = useState('manual')
   const [scanAvailable, setScanAvailable] = useState(null)
 
@@ -27,7 +27,7 @@ export default function AddTransaction({ categories, onAdd, onScanned, onPasted 
       </div>
 
       {mode === 'manual' && <AddExpense categories={categories} onAdd={onAdd} />}
-      {mode === 'photo' && <ScanReceipt available={scanAvailable} onAdded={onScanned} />}
+      {mode === 'photo' && <ScanReceipt available={scanAvailable} categories={categories} onAdd={onAdd} />}
       {mode === 'paste' && <PasteAlert onAdded={onPasted} />}
     </>
   )

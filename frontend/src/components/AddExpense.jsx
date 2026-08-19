@@ -10,12 +10,14 @@ const KIND_CHOICES = [
   { kind: 'self', label: 'My account', hint: 'internal transfer', Icon: AccountIcon },
 ]
 
-export default function AddExpense({ categories, onAdd }) {
-  const [amount, setAmount] = useState('')
-  const [direction, setDirection] = useState('debit')
+export default function AddExpense({ categories, onAdd, initial, confidenceWarning }) {
+  const [amount, setAmount] = useState(initial?.amount ? String(initial.amount) : '')
+  const [direction, setDirection] = useState(initial?.direction || 'debit')
   const [kind, setKind] = useState('expense')
-  const [category, setCategory] = useState('Food & Dining')
-  const [merchant, setMerchant] = useState('')
+  const [category, setCategory] = useState(
+    initial?.category && categories.includes(initial.category) ? initial.category : 'Food & Dining'
+  )
+  const [merchant, setMerchant] = useState(initial?.merchant || '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [showLocationAsk, setShowLocationAsk] = useState(false)
@@ -54,6 +56,12 @@ export default function AddExpense({ categories, onAdd }) {
         <h2 className="card-title">Add manually</h2>
         <span className="card-sub">for cash &amp; missed SMS</span>
       </div>
+
+      {confidenceWarning && (
+        <div className="banner error" style={{ marginBottom: 12 }}>
+          Wasn&apos;t fully sure about this one — please check the details below.
+        </div>
+      )}
 
       {kind === 'expense' && locationSupported() && getLocationConsent() === null && !showLocationAsk && !locationDecided && (
         <button type="button" className="location-toggle" onClick={() => setShowLocationAsk(true)}>

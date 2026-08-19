@@ -291,6 +291,22 @@ class TodoOut(BaseModel):
         return dt.isoformat() + "Z" if dt else None
 
 
+class ReceiptScanOut(BaseModel):
+    """What Gemini read off the photo — a preview, not a booked transaction.
+
+    The frontend shows this in the same shop/person/wallet/self chooser as a
+    manual entry before anything is saved: a scanned screenshot of money sent
+    to a friend must be classified as lending, not silently booked as a plain
+    expense just because it came from a photo instead of a form.
+    """
+
+    amount: float
+    merchant: Optional[str] = None
+    direction: str
+    category: str
+    confident: bool
+
+
 class LendingBalance(BaseModel):
     person: str
     lent: float

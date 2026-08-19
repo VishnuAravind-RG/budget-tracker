@@ -29,6 +29,7 @@ from schemas import (  # noqa: E402
     ManualTransaction,
     MerchantUpdate,
     MileageOut,
+    ReceiptScanOut,
     SMSPayload,
     TodoIn,
     TodoOut,
@@ -229,19 +230,26 @@ def ai_status():
     return {"receipt_scan_available": gemini_configured()}
 
 
-@api.post("/ai/scan-receipt", response_model=TransactionOut)
+@api.post("/ai/scan-receipt", response_model=ReceiptScanOut)
 async def scan_receipt_endpoint(
     image: UploadFile = File(...),
     note: str | None = Form(default=None),
-    db: Session = Depends(get_db),
 ):
-    """Reads a photo of a receipt/payment screenshot and books it as a
-    transaction. `note` is free text alongside the image — e.g. "this was
+    """Reads a photo of a receipt/payment screenshot and returns what it
+    found — amount, merchant, category, direction — without booking
+    anything yet. `note` is free text alongside the image — e.g. "this was
     for a friend's birthday, categorise as Entertainment" — treated as
     authoritative context, the same way a correction to a human assistant
-    would be. Booked with needs_review=True whenever the model itself wasn't
-    confident, exactly like an SMS-ingested transaction the AI is unsure
-    about — never silently guessed into a number that skews a total."""
+    would be.
+
+    Deliberately a preview, not a create: the model has no way to know a
+    scanned payment screenshot was actually money sent to a friend rather
+    than a shop purchase, so the frontend runs the result through the same
+    shop/person/wallet/self chooser as a manual entry (see AddExpense.jsx)
+    before anything is saved via POST /transactions/manual — otherwise every
+    photo-scanned lend or wallet top-up would get silently booked as a plain
+    expense and skew totals exactly the way CLAUDE.md warns against.
+    """
     if not gemini_configured():
         raise HTTPException(503, "Photo scanning isn't set up (no GEMINI_API_KEY on the server)")
 
@@ -273,19 +281,7 @@ async def scan_receipt_endpoint(
     if result["amount"] <= 0:
         raise HTTPException(422, "Couldn't read an amount from that image — try a clearer photo")
 
-    txn = Transaction(
-        merchant=result["merchant"] or "Scanned receipt",
-        amount=result["amount"],
-        direction=result["direction"],
-        category=result["category"],
-        source="ai_image",
-        needs_review=not result["confident"],
-        kind="income" if result["direction"] == "credit" else "expense",
-    )
-    db.add(txn)
-    db.commit()
-    db.refresh(txn)
-    return txn
+    return result
 
 
 @api.get("/transactions", response_model=list[TransactionOut])
