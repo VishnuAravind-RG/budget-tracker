@@ -58,7 +58,9 @@ function ReviewItem({ t, categories, onClassify }) {
           >
             <Icon />
             <span className="who-label">{choiceLabel}</span>
-            <span className="who-hint">{hint}</span>
+            <span className="who-hint">
+              {kind === 'friend' ? (t.direction === 'debit' ? 'money lent out' : 'paying me back') : hint}
+            </span>
           </button>
         ))}
       </div>
