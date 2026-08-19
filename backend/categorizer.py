@@ -1,6 +1,7 @@
 """SMS parsing + categorization: free rule-based fast path, then Claude if
-configured, then Gemini's free tier, then Azure OpenAI if configured — in
-that order, cheapest/most-available first."""
+configured, then Azure OpenAI, then Gemini's free tier as last resort —
+Azure went first because Gemini's free daily quota proved too small to
+survive even a one-time backlog pass, let alone rely on day to day."""
 
 import json
 import os
@@ -319,11 +320,11 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
         return {"category": "Income", "needs_review": False, "source": "income"}
 
     if client is None:
-        # No Claude key — try Gemini's free tier, then Azure OpenAI if that
-        # also comes back empty (unset, or its own daily quota exhausted —
-        # both fell through the same None contract), before giving up to a
-        # review slot.
-        result = _gemini_categorize(merchant, raw_text) or _azure_categorize(merchant, raw_text)
+        # No Claude key — try Azure OpenAI first (reliable, no free-tier
+        # quota wall), then Gemini's free tier as backup if that comes back
+        # empty (unset, or its own daily quota exhausted — both fall
+        # through the same None contract), before giving up to a review slot.
+        result = _azure_categorize(merchant, raw_text) or _gemini_categorize(merchant, raw_text)
         if result is None:
             return {"category": "Uncategorized", "needs_review": True, "source": "no_ai"}
         return {
