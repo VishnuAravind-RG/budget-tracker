@@ -73,6 +73,10 @@ export const api = {
   transactions: (month, year) => request(`/transactions${qs({ month, year })}`),
   needsReview: () => request('/transactions/needs-review'),
   addManual: (payload) => request('/transactions/manual', { method: 'POST', body: payload }),
+  // Manual fallback for the same pipe MacroDroid uses — paste a bank SMS or
+  // email-alert body in by hand when no automation caught it (e.g. a bank
+  // that only emails, never texts, for a given transaction).
+  pasteAlert: (text) => request('/sms/ingest', { method: 'POST', body: { text } }),
   setCategory: (id, category) =>
     request(`/transactions/${id}/category`, { method: 'PATCH', body: { category } }),
   // The Review tab's richer "who is this?" answer — merchant/friend/wallet/

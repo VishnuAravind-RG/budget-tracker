@@ -241,6 +241,13 @@ export default function App() {
               setTab((current) => (current === 'add' ? 'home' : current))
               refresh()
             }}
+            onPasted={(txn) => {
+              // A pasted alert can land needing review (unrecognised payee)
+              // rather than being confirmed outright — say so either way.
+              setToast(txn?.needs_review ? 'Added — needs review' : 'Added')
+              setTab((current) => (current === 'add' ? 'home' : current))
+              refresh()
+            }}
           />
         )}
 
