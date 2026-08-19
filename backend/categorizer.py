@@ -186,7 +186,7 @@ def _rule_match(merchant: str, raw_text: str) -> str | None:
     return None
 
 
-def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
+def _gemini_categorize(merchant: str, raw_text: str, _debug: bool = False) -> dict | None:
     """Same job as the Claude branch below, via Gemini's free tier instead.
     Returns None on any failure (bad key, network, malformed response,
     rate-limited — Gemini's free tier caps requests/minute, see
@@ -235,6 +235,8 @@ def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
             category = "Other"
         return {"category": category, "confident": bool(parsed.get("confident", False))}
     except Exception:
+        if _debug:
+            raise
         return None
 
 

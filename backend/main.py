@@ -412,6 +412,21 @@ def _recategorize_pending_sync(db: Session) -> dict:
     return {"checked": len(pending), "updated": updated}
 
 
+@api.get("/debug/gemini-test")
+def debug_gemini_test():
+    """Temporary, round 2 — pacing didn't fix recategorize-pending (still
+    0/28 updated), so this isn't just the per-minute rate limit. Remove once
+    root-caused."""
+    import traceback
+
+    from categorizer import _gemini_categorize
+    try:
+        result = _gemini_categorize("FRESH SUPERMARKET PERAMBUR C1", "Rs.194.00 debited towards FRESH SUPERMARKET PERAMBUR C1", _debug=True)
+        return {"result": result}
+    except Exception as e:
+        return {"error": repr(e), "trace": traceback.format_exc()}
+
+
 @api.post("/transactions/recategorize-pending")
 async def recategorize_pending(db: Session = Depends(get_db)):
     """Maintenance action: re-runs categorize() against everything still
