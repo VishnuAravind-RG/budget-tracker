@@ -431,7 +431,7 @@ def debug_gemini_test():
         method="POST",
     )
     try:
-        with ur.urlopen(req, timeout=15) as resp:
+        with ur.urlopen(req, timeout=40) as resp:
             body = resp.read().decode()
         return {"model": _gemini_model, "endpoint": _GEMINI_ENDPOINT, "key_set": bool(_gemini_key), "status": resp.status, "body": body}
     except urllib.error.HTTPError as e:
