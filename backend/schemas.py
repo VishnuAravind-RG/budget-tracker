@@ -50,8 +50,8 @@ class ManualTransaction(BaseModel):
     @field_validator("kind")
     @classmethod
     def _kind(cls, v: str) -> str:
-        if v not in ("expense", "friend", "wallet", "self"):
-            raise ValueError("kind must be one of: expense, friend, wallet, self")
+        if v not in ("expense", "friend", "friend_settle", "wallet", "self"):
+            raise ValueError("kind must be one of: expense, friend, friend_settle, wallet, self")
         return v
 
 
@@ -86,11 +86,12 @@ class TransactionClassify(BaseModel):
     @field_validator("kind")
     @classmethod
     def _kind(cls, v: str) -> str:
-        if v not in ("expense", "friend", "wallet", "self"):
-            # "friend"/"wallet"/"self" here map to lend-or-repayment/topup-or-
-            # transfer/transfer depending on the transaction's direction —
-            # resolved server-side in main.py, where direction is known.
-            raise ValueError("kind must be one of: expense, friend, wallet, self")
+        if v not in ("expense", "friend", "friend_settle", "wallet", "self"):
+            # "friend"/"friend_settle"/"wallet"/"self" map to lend-or-
+            # repayment/always-transfer/topup-or-transfer/transfer depending
+            # on the transaction's direction — resolved server-side in
+            # main.py, where direction is known.
+            raise ValueError("kind must be one of: expense, friend, friend_settle, wallet, self")
         return v
 
     @field_validator("category")

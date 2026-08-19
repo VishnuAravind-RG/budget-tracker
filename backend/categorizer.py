@@ -1,8 +1,11 @@
-"""SMS parsing + categorization: free rule-based fast path, Claude as the fallback."""
+"""SMS parsing + categorization: free rule-based fast path, then Claude if
+configured, then Gemini's free tier — in that order, cheapest first."""
 
 import json
 import os
 import re
+import urllib.error
+import urllib.request
 
 from anthropic import Anthropic
 
@@ -10,6 +13,15 @@ MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-5")
 
 _api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
 client = Anthropic(api_key=_api_key) if _api_key else None
+
+# Free-tier fallback: most personal deployments of this app won't want to
+# pay for Claude API calls just to categorise "Ss Hyderabad Biriyani" as
+# Food & Dining — Gemini's free tier does the same job for nothing, and
+# receipt_scan.py already needs a GEMINI_API_KEY for photo scanning, so
+# there's a good chance one's already configured.
+_gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+_gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+_GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_gemini_model}:generateContent"
 
 CATEGORIES = [
     "Food & Dining", "Groceries", "Transport", "Shopping",
@@ -174,6 +186,57 @@ def _rule_match(merchant: str, raw_text: str) -> str | None:
     return None
 
 
+def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
+    """Same job as the Claude branch below, via Gemini's free tier instead.
+    Returns None on any failure (bad key, network, malformed response) so the
+    caller falls through to the review queue rather than losing the
+    transaction — this is a nice-to-have automation, not something that
+    should ever be able to break ingestion."""
+    if not _gemini_key:
+        return None
+
+    body = {
+        "contents": [{
+            "parts": [{
+                "text": (
+                    "Classify this Indian bank transaction into exactly one category.\n\n"
+                    f"Merchant: {merchant}\nSMS text: {raw_text}\n\n"
+                    "Set confident=false if the merchant is unrecognisable or the text is "
+                    "too ambiguous to categorise reliably."
+                ),
+            }],
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "category": {"type": "STRING", "enum": CATEGORIES},
+                    "confident": {"type": "BOOLEAN"},
+                },
+                "required": ["category", "confident"],
+            },
+        },
+    }
+    req = urllib.request.Request(
+        f"{_GEMINI_ENDPOINT}?key={_gemini_key}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+        parsed = json.loads(text)
+        category = parsed.get("category", "Other")
+        if category not in CATEGORIES:
+            category = "Other"
+        return {"category": category, "confident": bool(parsed.get("confident", False))}
+    except Exception:
+        return None
+
+
 def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
     """Returns {'category', 'needs_review', 'source'}. Cheap path first, AI second.
 
@@ -181,7 +244,7 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
     also ask "who is this / merchant, friend, wallet, or my own account?":
     a hardcoded rule match is a definitively known brand (never ask), but an
     AI-confident guess on a brand-new counterparty still might be a friend or
-    a wallet Claude has no way to know about — see _ingest()'s payee handling.
+    a wallet the AI has no way to know about — see _ingest()'s payee handling.
     """
     hit = _rule_match(merchant, raw_text)
     if hit:
@@ -192,8 +255,15 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
         return {"category": "Income", "needs_review": False, "source": "income"}
 
     if client is None:
-        # No API key configured — park it in the review queue rather than guessing.
-        return {"category": "Uncategorized", "needs_review": True, "source": "no_ai"}
+        # No Claude key — try Gemini's free tier before giving up to a review slot.
+        gemini_result = _gemini_categorize(merchant, raw_text)
+        if gemini_result is None:
+            return {"category": "Uncategorized", "needs_review": True, "source": "no_ai"}
+        return {
+            "category": gemini_result["category"],
+            "needs_review": not gemini_result["confident"],
+            "source": "ai_confident" if gemini_result["confident"] else "ai_unsure",
+        }
 
     try:
         response = client.messages.create(

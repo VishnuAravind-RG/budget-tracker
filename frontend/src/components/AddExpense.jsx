@@ -14,6 +14,12 @@ export default function AddExpense({ categories, onAdd, initial, confidenceWarni
   const [amount, setAmount] = useState(initial?.amount ? String(initial.amount) : '')
   const [direction, setDirection] = useState(initial?.direction || 'debit')
   const [kind, setKind] = useState('expense')
+  // Only meaningful when kind === 'friend' — which side of the debt this is.
+  // 'lend' is the existing behaviour (you're the lender); 'settle' is the
+  // mirror case (paying back what you owe, or someone lending to you) and
+  // gets sent to the backend as kind='friend_settle' so it's tracked as a
+  // neutral transfer instead of inflating what they supposedly owe you.
+  const [personIntent, setPersonIntent] = useState('lend')
   const [category, setCategory] = useState(
     initial?.category && categories.includes(initial.category) ? initial.category : 'Food & Dining'
   )
@@ -36,13 +42,14 @@ export default function AddExpense({ categories, onAdd, initial, confidenceWarni
       await onAdd({
         amount: value,
         direction,
-        kind,
+        kind: kind === 'friend' && personIntent === 'settle' ? 'friend_settle' : kind,
         category: kind === 'expense' ? category : undefined,
         merchant: merchant.trim() || null,
       })
       setAmount('')
       setMerchant('')
       setKind('expense')
+      setPersonIntent('lend')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -119,6 +126,20 @@ export default function AddExpense({ categories, onAdd, initial, confidenceWarni
             ))}
           </div>
         </div>
+
+        {kind === 'friend' && (
+          <div className="field">
+            <label>Which is it?</label>
+            <div className="seg">
+              <button type="button" aria-pressed={personIntent === 'lend'} onClick={() => setPersonIntent('lend')}>
+                {direction === 'debit' ? 'Lending them money' : "They're paying me back"}
+              </button>
+              <button type="button" aria-pressed={personIntent === 'settle'} onClick={() => setPersonIntent('settle')}>
+                {direction === 'debit' ? 'Paying back what I owe' : "They're lending me money"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {kind === 'expense' && (
           <div className="field">

@@ -89,6 +89,15 @@ def _resolve_kind(kind_choice: str, direction: str, label: str, requested_catego
     is_debit = direction == "debit"
     if kind_choice == "friend":
         return ("lend" if is_debit else "repayment"), (requested_category or "Lending"), label
+    if kind_choice == "friend_settle":
+        # The mirror of "friend": a debit here is paying back a debt *you*
+        # owe (not lending anything new out), and a credit is someone
+        # lending *you* money (not repaying an existing loan of yours).
+        # Neither should move the Lending tab's "who owes you" balance —
+        # lending_balances() only ever looks at kind in (lend, repayment),
+        # so filing this as a plain transfer keeps it out of that ledger
+        # entirely while still recording who it was with.
+        return "transfer", (requested_category or "Transfer"), label
     if kind_choice == "wallet":
         return ("topup" if is_debit else "transfer"), (requested_category or "Transfer"), None
     if kind_choice == "self":
@@ -270,7 +279,7 @@ async def gmail_poll_endpoint(db: Session = Depends(get_db)):
 
 @api.post("/transactions/manual", response_model=TransactionOut)
 def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
-    label = payload.merchant or ("Someone" if payload.kind == "friend" else "Transaction")
+    label = payload.merchant or ("Someone" if payload.kind in ("friend", "friend_settle") else "Transaction")
     fallback_category = payload.category or "Uncategorized"
     kind, category, counterparty = _resolve_kind(payload.kind, payload.direction, label, payload.category, fallback_category)
 

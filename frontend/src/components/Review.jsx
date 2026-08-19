@@ -14,6 +14,11 @@ function ReviewItem({ t, categories, onClassify }) {
   const [choice, setChoice] = useState(null)
   const [label, setLabel] = useState(t.merchant === 'Unknown' ? '' : t.merchant || '')
   const [category, setCategory] = useState(t.category !== 'Uncategorized' ? t.category : 'Food & Dining')
+  // Only meaningful when choice === 'friend' — see AddExpense.jsx for the
+  // full reasoning: 'settle' sends kind='friend_settle' so paying back a
+  // debt you owe (or someone lending to you) doesn't get filed as if you
+  // were the one lending money out.
+  const [personIntent, setPersonIntent] = useState('lend')
   const [busy, setBusy] = useState(false)
 
   async function save() {
@@ -21,7 +26,7 @@ function ReviewItem({ t, categories, onClassify }) {
     setBusy(true)
     try {
       await onClassify(t.id, {
-        kind: choice,
+        kind: choice === 'friend' && personIntent === 'settle' ? 'friend_settle' : choice,
         label: label.trim() || undefined,
         category: choice === 'expense' ? category : undefined,
         remember: true,
@@ -67,6 +72,17 @@ function ReviewItem({ t, categories, onClassify }) {
 
       {choice && (
         <div className="who-detail">
+          {choice === 'friend' && (
+            <div className="seg" style={{ marginBottom: 10 }}>
+              <button type="button" aria-pressed={personIntent === 'lend'} onClick={() => setPersonIntent('lend')}>
+                {t.direction === 'debit' ? 'Lending them money' : "They're paying me back"}
+              </button>
+              <button type="button" aria-pressed={personIntent === 'settle'} onClick={() => setPersonIntent('settle')}>
+                {t.direction === 'debit' ? 'Paying back what I owe' : "They're lending me money"}
+              </button>
+            </div>
+          )}
+
           <input
             type="text"
             placeholder={choice === 'friend' ? 'Their name' : 'Name this'}
