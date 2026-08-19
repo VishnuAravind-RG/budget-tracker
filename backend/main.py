@@ -1,5 +1,6 @@
 import asyncio
 import os
+import secrets
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -10,13 +11,15 @@ load_dotenv(encoding="utf-8-sig")
 
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
 from sqlalchemy import func  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
-from auth import require_token  # noqa: E402
+import gmail_poll  # noqa: E402
+from auth import AUTH_TOKEN, require_token  # noqa: E402
 from categorizer import CATEGORIES, categorize, parse_sms, payee_key_for  # noqa: E402
 from db import get_db, init_db  # noqa: E402
-from models import Budget, FuelFill, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
+from models import Budget, FuelFill, GmailAuth, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
 from receipt_scan import ReceiptScanError, gemini_configured, scan_receipt  # noqa: E402
 from schemas import (  # noqa: E402
     BudgetSet,
@@ -196,6 +199,73 @@ def _ingest(text: str, db: Session):
     db.commit()
     db.refresh(txn)
     return {"status": "ok", "transaction": TransactionOut.model_validate(txn)}
+
+
+@app.get("/gmail/auth/start")
+def gmail_auth_start(token: str = ""):
+    """One-time, done by hand in a browser — see gmail_poll.py's module
+    docstring. Not behind the `api` router (a browser redirect can't carry
+    an Authorization header) — gated instead by the same shared secret as a
+    query param, so only whoever holds AUTH_TOKEN can (re)point the poller
+    at a Gmail account."""
+    if not secrets.compare_digest(token, AUTH_TOKEN):
+        raise HTTPException(401, "Invalid or missing token")
+    if not gmail_poll.configured():
+        raise HTTPException(503, "GOOGLE_CLIENT_ID/SECRET/REDIRECT_URI not set on the server")
+    return RedirectResponse(gmail_poll.auth_url())
+
+
+@app.get("/gmail/auth/callback")
+def gmail_auth_callback(code: str = "", error: str = "", db: Session = Depends(get_db)):
+    """Google's redirect target after the user approves (or declines) access."""
+    if error:
+        return HTMLResponse(f"<p>Google returned an error: {error}</p>", status_code=400)
+    if not code:
+        raise HTTPException(422, "Missing code")
+    try:
+        tokens = gmail_poll.exchange_code(code)
+    except gmail_poll.GmailPollError as e:
+        return HTMLResponse(f"<p>Token exchange failed: {e}</p>", status_code=502)
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        # Google only issues a refresh_token on first consent, or when
+        # prompt=consent forces re-issue — auth_url() always sets that, so
+        # this shouldn't normally happen.
+        return HTMLResponse(
+            "<p>No refresh token in Google's response. Revoke this app's access at "
+            "myaccount.google.com/permissions and try the link again.</p>",
+            status_code=502,
+        )
+    existing = db.get(GmailAuth, 1)
+    if existing:
+        existing.refresh_token = refresh_token
+    else:
+        db.add(GmailAuth(id=1, refresh_token=refresh_token))
+    db.commit()
+    return HTMLResponse("<p>Gmail connected — you can close this tab.</p>")
+
+
+@api.post("/gmail/poll")
+async def gmail_poll_endpoint(db: Session = Depends(get_db)):
+    """Hit on a schedule by .github/workflows/gmail-poll.yml, same pattern as
+    keep-alive.yml. Async + asyncio.to_thread() for the same reason as
+    /sms/ingest/raw and /ai/scan-receipt: several sequential HTTPS calls to
+    Google easily add up to a few seconds, and running that directly on the
+    event loop would freeze every other request (including /health) for as
+    long as it takes."""
+    row = db.get(GmailAuth, 1)
+    if not row:
+        raise HTTPException(400, "Gmail not connected yet — visit /gmail/auth/start?token=<AUTH_TOKEN> once")
+
+    try:
+        texts = await asyncio.to_thread(gmail_poll.fetch_new_alerts, row.refresh_token, row.last_poll_at)
+    except gmail_poll.GmailPollError as e:
+        raise HTTPException(502, str(e)) from e
+
+    results = [_ingest(text, db) for text in texts]
+    row.last_poll_at = utc_now_naive()
+    db.commit()
+    return {"checked": len(texts), "results": results}
 
 
 @api.post("/transactions/manual", response_model=TransactionOut)

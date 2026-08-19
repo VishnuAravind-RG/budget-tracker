@@ -1,0 +1,30 @@
+name: Poll Gmail for bank alerts
+
+# HDFC (and possibly other banks later) emails every transaction alert for
+# this account instead of texting it — SMS-only automation (MacroDroid)
+# never sees those. This calls the backend's own poller on a schedule so new
+# alerts get ingested automatically, the same way MacroDroid does for SMS.
+# See backend/gmail_poll.py for the one-time OAuth setup this depends on.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /gmail/poll
+        env:
+          APP_AUTH_TOKEN: ${{ secrets.APP_AUTH_TOKEN }}
+        run: |
+          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" --max-time 60 \
+            -X POST https://budget-tracker-api-jkub.onrender.com/gmail/poll \
+            -H "Authorization: Bearer $APP_AUTH_TOKEN")
+          echo "Response ($code):"
+          cat /tmp/resp.json
+          echo
+          if [ "$code" != "200" ]; then
+            echo "::warning::Gmail poll returned $code"
+          fi

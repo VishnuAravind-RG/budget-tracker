@@ -108,12 +108,18 @@ def parse_sms(text: str) -> dict:
     direction = "credit" if (is_credit and not is_debit) else "debit"
 
     merchant = ""
-    for pattern in MERCHANT_PATTERNS:
-        found = pattern.search(text)
-        if found:
-            merchant = _clean_merchant(found.group(1))
-            if merchant:
-                break
+    # HDFC's "account credited" email template ("...successfully credited to
+    # your HDFC Bank account ending in 9393. Transaction Details: ...") names
+    # no counterparty at all — the generic merchant pattern below would
+    # otherwise grab boilerplate prose ("inform you that Rs") as if it were
+    # one, since "to your ... account" matches its "to <name>" shape.
+    if "successfully credited to your" not in text.lower():
+        for pattern in MERCHANT_PATTERNS:
+            found = pattern.search(text)
+            if found:
+                merchant = _clean_merchant(found.group(1))
+                if merchant:
+                    break
 
     is_transaction = (
         amount > 0

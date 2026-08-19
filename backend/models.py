@@ -100,6 +100,18 @@ class Todo(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class GmailAuth(Base):
+    """Single-row store (id is always 1) for the Gmail OAuth refresh token
+    the poller uses, plus a watermark of when it last checked so a run only
+    asks Gmail for messages newer than that instead of re-scanning the whole
+    inbox every time. See gmail_poll.py."""
+    __tablename__ = "gmail_auth"
+
+    id = Column(Integer, primary_key=True, default=1)
+    refresh_token = Column(String, nullable=False)
+    last_poll_at = Column(DateTime, nullable=True)
+
+
 class LendingReminder(Base):
     """'Nudge me again in N days to ask this person for the money back.'"""
     __tablename__ = "lending_reminders"
