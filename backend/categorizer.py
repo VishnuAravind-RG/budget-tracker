@@ -1,5 +1,6 @@
 """SMS parsing + categorization: free rule-based fast path, then Claude if
-configured, then Gemini's free tier — in that order, cheapest first."""
+configured, then Gemini's free tier, then Azure OpenAI if configured — in
+that order, cheapest/most-available first."""
 
 import json
 import os
@@ -28,6 +29,16 @@ _gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
 # "latest" auto-upgrading to whatever's newest is exactly how this broke.
 _gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 _GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_gemini_model}:generateContent"
+
+# Second free-ish fallback, tried only if Gemini itself is unset or fails
+# (e.g. its daily quota is exhausted, as happened during a large one-time
+# backfill — see the comment above). Azure OpenAI needs three separate
+# pieces, not just a key: the resource endpoint and the deployment name
+# (the name given to the model when it was deployed in Azure, not
+# necessarily matching the underlying model's own name).
+_azure_key = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+_azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+_azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
 
 CATEGORIES = [
     "Food & Dining", "Groceries", "Transport", "Shopping",
@@ -248,6 +259,48 @@ def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
         return None
 
 
+def _azure_categorize(merchant: str, raw_text: str) -> dict | None:
+    """Same job again, via an Azure OpenAI deployment. Only reached when
+    Gemini itself isn't configured or just failed (e.g. quota) — see
+    categorize() below. Returns None on any failure, same contract as
+    _gemini_categorize(), for the same reason: never allowed to break
+    ingestion, this is strictly a nice-to-have."""
+    if not (_azure_key and _azure_endpoint and _azure_deployment):
+        return None
+
+    body = {
+        "model": _azure_deployment,
+        "messages": [{
+            "role": "user",
+            "content": (
+                "Classify this Indian bank transaction into exactly one category.\n\n"
+                f"Categories: {', '.join(CATEGORIES)}.\n\n"
+                f"Merchant: {merchant}\nSMS text: {raw_text}\n\n"
+                "Set confident=false if the merchant is unrecognisable or the text is "
+                "too ambiguous to categorise reliably. "
+                'Reply with a JSON object: {"category": string, "confident": bool}'
+            ),
+        }],
+        "response_format": {"type": "json_object"},
+    }
+    req = urllib.request.Request(
+        f"{_azure_endpoint}/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "api-key": _azure_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        parsed = json.loads(data["choices"][0]["message"]["content"])
+        category = parsed.get("category", "Other")
+        if category not in CATEGORIES:
+            category = "Other"
+        return {"category": category, "confident": bool(parsed.get("confident", False))}
+    except Exception:
+        return None
+
+
 def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
     """Returns {'category', 'needs_review', 'source'}. Cheap path first, AI second.
 
@@ -266,14 +319,17 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
         return {"category": "Income", "needs_review": False, "source": "income"}
 
     if client is None:
-        # No Claude key — try Gemini's free tier before giving up to a review slot.
-        gemini_result = _gemini_categorize(merchant, raw_text)
-        if gemini_result is None:
+        # No Claude key — try Gemini's free tier, then Azure OpenAI if that
+        # also comes back empty (unset, or its own daily quota exhausted —
+        # both fell through the same None contract), before giving up to a
+        # review slot.
+        result = _gemini_categorize(merchant, raw_text) or _azure_categorize(merchant, raw_text)
+        if result is None:
             return {"category": "Uncategorized", "needs_review": True, "source": "no_ai"}
         return {
-            "category": gemini_result["category"],
-            "needs_review": not gemini_result["confident"],
-            "source": "ai_confident" if gemini_result["confident"] else "ai_unsure",
+            "category": result["category"],
+            "needs_review": not result["confident"],
+            "source": "ai_confident" if result["confident"] else "ai_unsure",
         }
 
     try:
