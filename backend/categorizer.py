@@ -20,7 +20,13 @@ client = Anthropic(api_key=_api_key) if _api_key else None
 # receipt_scan.py already needs a GEMINI_API_KEY for photo scanning, so
 # there's a good chance one's already configured.
 _gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
-_gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+# "gemini-flash-latest" was the previous default here — it silently resolved
+# to gemini-3.7-flash, a newer model whose free tier caps out at 20 requests
+# *per day*, not per minute. Confirmed live via Google's own error body:
+# "GenerateRequestsPerDayPerProjectPerModel-FreeTier ... quotaValue: 20".
+# Pinned to an established flash model with a real free allowance instead —
+# "latest" auto-upgrading to whatever's newest is exactly how this broke.
+_gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_gemini_model}:generateContent"
 
 CATEGORIES = [
@@ -186,13 +192,12 @@ def _rule_match(merchant: str, raw_text: str) -> str | None:
     return None
 
 
-def _gemini_categorize(merchant: str, raw_text: str, _debug: bool = False) -> dict | None:
+def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
     """Same job as the Claude branch below, via Gemini's free tier instead.
     Returns None on any failure (bad key, network, malformed response,
-    rate-limited — Gemini's free tier caps requests/minute, see
-    _recategorize_pending_sync's pacing) so the caller falls through to the
-    review queue rather than losing the transaction — this is a nice-to-have
-    automation, not something that should ever be able to break ingestion."""
+    quota exhausted) so the caller falls through to the review queue rather
+    than losing the transaction — this is a nice-to-have automation, not
+    something that should ever be able to break ingestion."""
     if not _gemini_key:
         return None
 
@@ -235,8 +240,6 @@ def _gemini_categorize(merchant: str, raw_text: str, _debug: bool = False) -> di
             category = "Other"
         return {"category": category, "confident": bool(parsed.get("confident", False))}
     except Exception:
-        if _debug:
-            raise
         return None
 
 

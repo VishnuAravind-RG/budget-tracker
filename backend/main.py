@@ -412,24 +412,6 @@ def _recategorize_pending_sync(db: Session) -> dict:
     return {"checked": len(pending), "updated": updated}
 
 
-@api.get("/debug/gemini-test")
-def debug_gemini_test():
-    """Temporary, round 3 — the 429 persists on a single isolated call, not
-    just a burst, so it's not the per-minute rate limit alone. Capturing
-    Google's actual error body this time (HTTPError.read()), which usually
-    names the specific exhausted quota. Remove once root-caused."""
-    import urllib.error
-
-    from categorizer import _gemini_categorize
-    try:
-        result = _gemini_categorize("FRESH SUPERMARKET PERAMBUR C1", "Rs.194.00 debited towards FRESH SUPERMARKET PERAMBUR C1", _debug=True)
-        return {"result": result}
-    except urllib.error.HTTPError as e:
-        return {"http_error": e.code, "body": e.read().decode(errors="replace")}
-    except Exception as e:
-        return {"error": repr(e)}
-
-
 @api.post("/transactions/recategorize-pending")
 async def recategorize_pending(db: Session = Depends(get_db)):
     """Maintenance action: re-runs categorize() against everything still
