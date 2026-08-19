@@ -389,21 +389,27 @@ def needs_review(db: Session = Depends(get_db)):
     )
 
 
-def _recategorize_pending_sync(db: Session) -> dict:
+def _recategorize_pending_sync(db: Session, limit: int) -> dict:
+    # Only still-Uncategorized rows, so repeated small batches naturally
+    # pick up where the last one left off instead of reprocessing anything
+    # already fixed — needed because Render's own gateway kills a request
+    # around ~30s regardless of the backend still working (confirmed live:
+    # a single unbatched call over the whole backlog returned a 502 to the
+    # client after only 4 of 29 actually got updated server-side).
     pending = (
         db.query(Transaction)
-        .filter(Transaction.needs_review.is_(True), Transaction.direction == "debit")
+        .filter(
+            Transaction.needs_review.is_(True),
+            Transaction.direction == "debit",
+            Transaction.category == "Uncategorized",
+        )
+        .limit(limit)
         .all()
     )
     updated = 0
     for i, txn in enumerate(pending):
         if i > 0:
-            # Gemini's free tier caps requests per minute — firing a whole
-            # backlog back-to-back blew straight through it (confirmed via
-            # /debug/gemini-test: HTTP 429), so every call in the first real
-            # run silently failed and nothing got updated. ~4s/call keeps
-            # this comfortably under a 15 RPM ceiling.
-            time.sleep(4)
+            time.sleep(1)
         result = categorize(txn.merchant or "", txn.raw_text or "", txn.direction)
         if result["source"] == "ai_confident" and result["category"] != txn.category:
             txn.category = result["category"]
@@ -413,18 +419,17 @@ def _recategorize_pending_sync(db: Session) -> dict:
 
 
 @api.post("/transactions/recategorize-pending")
-async def recategorize_pending(db: Session = Depends(get_db)):
-    """Maintenance action: re-runs categorize() against everything still
-    sitting in Review and updates just the category field when a confident
-    AI result comes back — needs_review is left untouched, so the shop /
-    person / wallet / my account question still gets asked, just with a
-    correct category pre-filled in Review's chip picker instead of always
-    defaulting to Food & Dining. Exists because a large batch of Gmail-
-    backfilled transactions predates Gemini being wired into categorize(),
-    so they never got a real categorization pass. Runs each merchant through
-    a Gemini call sequentially — easily tens of seconds for a big backlog —
-    hence async + to_thread, same reasoning as every other slow route here."""
-    return await asyncio.to_thread(_recategorize_pending_sync, db)
+async def recategorize_pending(limit: int = Query(default=8, ge=1, le=50), db: Session = Depends(get_db)):
+    """Maintenance action: re-runs categorize() against transactions still
+    sitting in Review with category=Uncategorized, and updates just the
+    category field when a confident AI result comes back — needs_review is
+    left untouched, so the shop/person/wallet/my account question still
+    gets asked, just with a correct category pre-filled in Review's chip
+    picker instead of always defaulting to Food & Dining. `limit` keeps a
+    single call well under Render's own gateway timeout; call repeatedly
+    (the Uncategorized filter makes it safe to re-call — always picks up
+    wherever the last call left off) to work through a larger backlog."""
+    return await asyncio.to_thread(_recategorize_pending_sync, db, limit)
 
 
 @api.patch("/transactions/{txn_id}/category", response_model=TransactionOut)
