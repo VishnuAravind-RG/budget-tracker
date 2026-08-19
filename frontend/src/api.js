@@ -117,6 +117,9 @@ export const api = {
   deleteTodo: (id) => request(`/todos/${id}`, { method: 'DELETE' }),
   clearCompletedTodos: () => request('/todos/clear-completed', { method: 'POST' }),
 
+  // ---- memory ----
+  payees: () => request('/payees'),
+
   // ---- lending ----
   lending: () => request('/lending'),
   snoozeLendingReminder: (person, days = 3) =>

@@ -308,6 +308,24 @@ class ReceiptScanOut(BaseModel):
     confident: bool
 
 
+class PayeeOut(BaseModel):
+    """One remembered 'who is this?' answer — see models.Payee. Read-only:
+    the memory is written by /transactions/{id}/classify and add_manual(),
+    this is just a way to actually see it, which nothing exposed before."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    label: str
+    kind: str
+    default_category: Optional[str]
+    created_at: datetime
+
+    @field_serializer("created_at")
+    def _utc(self, dt: datetime) -> str:
+        return dt.isoformat() + "Z"
+
+
 class LendingBalance(BaseModel):
     person: str
     lent: float

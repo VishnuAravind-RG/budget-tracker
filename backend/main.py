@@ -33,6 +33,7 @@ from schemas import (  # noqa: E402
     ManualTransaction,
     MerchantUpdate,
     MileageOut,
+    PayeeOut,
     ReceiptScanOut,
     SMSPayload,
     TodoIn,
@@ -666,6 +667,15 @@ def daily_trend(
         for day in range(1, days_in_month(y, m) + 1)
     ]
     return {"month": m, "year": y, "days": days}
+
+
+@api.get("/payees", response_model=list[PayeeOut])
+def list_payees(db: Session = Depends(get_db)):
+    """Everything remembered from a 'who is this?' answer — shop, person,
+    wallet, or your own account. Read-only visibility into memory that was
+    previously invisible: it silently drove classification (new sightings
+    of the same payee skip Review) but had no way to actually be seen."""
+    return db.query(Payee).order_by(Payee.created_at.desc()).all()
 
 
 @api.get("/categories")
