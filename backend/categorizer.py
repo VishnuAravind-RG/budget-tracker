@@ -59,6 +59,20 @@ CREDIT_RE = re.compile(r"\b(credited|received|refund(?:ed)?|deposited|cashback)\
 MERCHANT_PATTERNS = [
     re.compile(r"\bVPA\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE),
     re.compile(r"\b(?:to|at|towards|for|from)\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE),
+    # "Sent Rs.X\nFrom <bank> A/C *nnnn\nTo <name>\n..." — a common bank-SMS
+    # shape for a UPI send, where "From" names the SENDER's own bank/account,
+    # not a counterparty. Tried before the general pattern below so "To
+    # <name>" wins over an earlier "From <bank>" match in the same text —
+    # re.search always returns the leftmost match, and "From" precedes "To"
+    # in this template, so without this the sender's bank got captured as
+    # the merchant instead of who the money actually went to.
+    re.compile(
+        r"\bto\s+"
+        r"(?!(?:rs\.?|inr|₹)\b)"
+        r"([A-Za-z][A-Za-z0-9&'.\- ]{1,38}?)"
+        r"(?=\s+(?:on|ref|upi|via|dated|txn|a/c|account|bal|avl|towards)\b|[.,;()\n]|$)",
+        re.IGNORECASE,
+    ),
     re.compile(
         # "...debited for SWIGGY on 12-05" / "...spent at AMAZON on ..."
         # The lookahead stops it starting on a currency token, so
