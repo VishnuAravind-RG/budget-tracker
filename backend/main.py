@@ -1,6 +1,7 @@
 import asyncio
 import os
 import secrets
+import time
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -395,28 +396,20 @@ def _recategorize_pending_sync(db: Session) -> dict:
         .all()
     )
     updated = 0
-    for txn in pending:
+    for i, txn in enumerate(pending):
+        if i > 0:
+            # Gemini's free tier caps requests per minute — firing a whole
+            # backlog back-to-back blew straight through it (confirmed via
+            # /debug/gemini-test: HTTP 429), so every call in the first real
+            # run silently failed and nothing got updated. ~4s/call keeps
+            # this comfortably under a 15 RPM ceiling.
+            time.sleep(4)
         result = categorize(txn.merchant or "", txn.raw_text or "", txn.direction)
         if result["source"] == "ai_confident" and result["category"] != txn.category:
             txn.category = result["category"]
             updated += 1
     db.commit()
     return {"checked": len(pending), "updated": updated}
-
-
-@api.get("/debug/gemini-test")
-def debug_gemini_test():
-    """Temporary — surfaces the real exception from _gemini_categorize()
-    instead of the swallowed None, to diagnose why recategorize-pending
-    updated 0 of 27. Remove once that's root-caused."""
-    import traceback
-
-    from categorizer import _gemini_categorize
-    try:
-        result = _gemini_categorize("FRESH SUPERMARKET PERAMBUR C1", "Rs.194.00 debited towards FRESH SUPERMARKET PERAMBUR C1", _debug=True)
-        return {"result": result}
-    except Exception as e:
-        return {"error": repr(e), "trace": traceback.format_exc()}
 
 
 @api.post("/transactions/recategorize-pending")

@@ -186,16 +186,14 @@ def _rule_match(merchant: str, raw_text: str) -> str | None:
     return None
 
 
-def _gemini_categorize(merchant: str, raw_text: str, _debug: bool = False) -> dict | None:
+def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
     """Same job as the Claude branch below, via Gemini's free tier instead.
-    Returns None on any failure (bad key, network, malformed response) so the
-    caller falls through to the review queue rather than losing the
-    transaction — this is a nice-to-have automation, not something that
-    should ever be able to break ingestion. `_debug=True` re-raises instead,
-    for /debug/gemini-test to surface the real error."""
+    Returns None on any failure (bad key, network, malformed response,
+    rate-limited — Gemini's free tier caps requests/minute, see
+    _recategorize_pending_sync's pacing) so the caller falls through to the
+    review queue rather than losing the transaction — this is a nice-to-have
+    automation, not something that should ever be able to break ingestion."""
     if not _gemini_key:
-        if _debug:
-            raise RuntimeError("GEMINI_API_KEY is not set")
         return None
 
     body = {
@@ -237,8 +235,6 @@ def _gemini_categorize(merchant: str, raw_text: str, _debug: bool = False) -> di
             category = "Other"
         return {"category": category, "confident": bool(parsed.get("confident", False))}
     except Exception:
-        if _debug:
-            raise
         return None
 
 
