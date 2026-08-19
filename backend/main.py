@@ -388,6 +388,37 @@ def needs_review(db: Session = Depends(get_db)):
     )
 
 
+def _recategorize_pending_sync(db: Session) -> dict:
+    pending = (
+        db.query(Transaction)
+        .filter(Transaction.needs_review.is_(True), Transaction.direction == "debit")
+        .all()
+    )
+    updated = 0
+    for txn in pending:
+        result = categorize(txn.merchant or "", txn.raw_text or "", txn.direction)
+        if result["source"] == "ai_confident" and result["category"] != txn.category:
+            txn.category = result["category"]
+            updated += 1
+    db.commit()
+    return {"checked": len(pending), "updated": updated}
+
+
+@api.post("/transactions/recategorize-pending")
+async def recategorize_pending(db: Session = Depends(get_db)):
+    """Maintenance action: re-runs categorize() against everything still
+    sitting in Review and updates just the category field when a confident
+    AI result comes back — needs_review is left untouched, so the shop /
+    person / wallet / my account question still gets asked, just with a
+    correct category pre-filled in Review's chip picker instead of always
+    defaulting to Food & Dining. Exists because a large batch of Gmail-
+    backfilled transactions predates Gemini being wired into categorize(),
+    so they never got a real categorization pass. Runs each merchant through
+    a Gemini call sequentially — easily tens of seconds for a big backlog —
+    hence async + to_thread, same reasoning as every other slow route here."""
+    return await asyncio.to_thread(_recategorize_pending_sync, db)
+
+
 @api.patch("/transactions/{txn_id}/category", response_model=TransactionOut)
 def update_category(txn_id: int, payload: CategoryUpdate, db: Session = Depends(get_db)):
     txn = db.get(Transaction, txn_id)
