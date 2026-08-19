@@ -222,6 +222,11 @@ def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
                 },
                 "required": ["category", "confident"],
             },
+            # gemini-3.6-flash thinks by default (confirmed live: 65 thinking
+            # tokens spent on "reply with the word ok") — real latency for a
+            # trivial classification task that doesn't need it, and wasted
+            # tokens against the free-tier daily quota. Off entirely.
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
     req = urllib.request.Request(
@@ -231,7 +236,7 @@ def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
         parsed = json.loads(text)

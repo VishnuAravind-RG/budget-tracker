@@ -412,34 +412,6 @@ def _recategorize_pending_sync(db: Session) -> dict:
     return {"checked": len(pending), "updated": updated}
 
 
-@api.get("/debug/gemini-test")
-def debug_gemini_test():
-    """Temporary, round 4 — switching to gemini-2.5-flash still left a test
-    ingest as Uncategorized. Bypasses _gemini_categorize()'s internal
-    try/except entirely (inlined here) so nothing swallows the real error —
-    checking whether that's a fresh quota issue or the model name itself
-    being wrong. Remove once root-caused."""
-    import urllib.error
-    import urllib.request as ur
-
-    from categorizer import _gemini_key, _gemini_model, _GEMINI_ENDPOINT
-
-    req = ur.Request(
-        f"{_GEMINI_ENDPOINT}?key={_gemini_key}",
-        data=b'{"contents":[{"parts":[{"text":"Reply with the single word: ok"}]}]}',
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with ur.urlopen(req, timeout=40) as resp:
-            body = resp.read().decode()
-        return {"model": _gemini_model, "endpoint": _GEMINI_ENDPOINT, "key_set": bool(_gemini_key), "status": resp.status, "body": body}
-    except urllib.error.HTTPError as e:
-        return {"model": _gemini_model, "endpoint": _GEMINI_ENDPOINT, "key_set": bool(_gemini_key), "http_error": e.code, "body": e.read().decode(errors="replace")}
-    except Exception as e:
-        return {"model": _gemini_model, "endpoint": _GEMINI_ENDPOINT, "key_set": bool(_gemini_key), "error": repr(e)}
-
-
 @api.post("/transactions/recategorize-pending")
 async def recategorize_pending(db: Session = Depends(get_db)):
     """Maintenance action: re-runs categorize() against everything still
