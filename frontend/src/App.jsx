@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { api, clearToken, getToken, setToken } from './api.js'
+import { clearCache, readCache, writeCache } from './cache.js'
 import { monthName } from './format.js'
 import { captureLocationOnce, getLocationConsent } from './location.js'
 import { detectRecurring } from './recurring.js'
@@ -48,6 +49,9 @@ export default function App() {
   useEffect(() => {
     const onUnauthorized = () => {
       clearToken()
+      // Drop the snapshot too: whoever signs in next must not be shown the
+      // previous session's figures while their own first fetch is in flight.
+      clearCache()
       setTok('')
     }
     window.addEventListener('bt:unauthorized', onUnauthorized)
@@ -87,13 +91,36 @@ export default function App() {
       setReview(rv)
       setLimits(lm)
       setLending(ln)
-      setRecurring(detectRecurring(recentAll))
+      const rec = detectRecurring(recentAll)
+      setRecurring(rec)
+      // Snapshot only after everything succeeded, so a half-failed refresh
+      // can never persist a partial month and show wrong totals next open.
+      writeCache(period.month, period.year, {
+        summary: s, trend: tr, transactions: tx, review: rv,
+        limits: lm, lending: ln, recurring: rec,
+      })
     } catch (err) {
       if (err.status !== 401) setError(err.message)
     } finally {
       clearTimeout(slowTimer)
       setWakingUp(false)
     }
+  }, [token, period.month, period.year])
+
+  // Paint the last known month instantly, then let refresh() overwrite it.
+  // Runs before/alongside the fetch rather than instead of it — the network
+  // result always wins, this only removes the blank wait in front of it.
+  useEffect(() => {
+    if (!token) return
+    const cached = readCache(period.month, period.year)
+    if (!cached) return
+    setSummary((cur) => cur ?? cached.summary)
+    setTrend((cur) => cur ?? cached.trend)
+    setTransactions((cur) => cur ?? cached.transactions)
+    setReview((cur) => cur ?? cached.review)
+    setLending((cur) => cur ?? cached.lending)
+    setLimits((cur) => (cur.length ? cur : cached.limits || []))
+    setRecurring((cur) => (cur.length ? cur : cached.recurring || []))
   }, [token, period.month, period.year])
 
   useEffect(() => {
@@ -219,7 +246,10 @@ export default function App() {
 
       <main>
         {error && <div className="banner error">{error}</div>}
-        {wakingUp && !error && (
+        {/* Only when there's genuinely nothing on screen — with a cached month
+            already painted, this banner would imply the visible figures are
+            broken rather than simply a few seconds old. */}
+        {wakingUp && !error && !summary && (
           <div className="banner">
             Waking up the server — the free hosting tier sleeps when idle, so this
             first load can take up to a minute. It&apos;s quick after that.
@@ -282,6 +312,7 @@ export default function App() {
               // Deliberate action only — a stray tap must never log the user out.
               if (confirm("Sign out? You'll need to re-enter your access token to get back in.")) {
                 clearToken()
+                clearCache()
                 setTok('')
               }
             }}

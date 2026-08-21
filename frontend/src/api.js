@@ -24,18 +24,31 @@ async function request(path, { method = 'GET', body, token } = {}) {
   // explicit Content-Type — the browser sets multipart/form-data with the
   // right boundary itself; setting it by hand breaks the boundary.
   const isForm = body instanceof FormData
+  const send = () => fetch(BASE + path, {
+    method,
+    headers: {
+      ...(body && !isForm ? { 'Content-Type': 'application/json' } : {}),
+      ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
+    },
+    body: isForm ? body : body ? JSON.stringify(body) : undefined,
+  })
+
   let response
   try {
-    response = await fetch(BASE + path, {
-      method,
-      headers: {
-        ...(body && !isForm ? { 'Content-Type': 'application/json' } : {}),
-        ...(auth ? { Authorization: `Bearer ${auth}` } : {}),
-      },
-      body: isForm ? body : body ? JSON.stringify(body) : undefined,
-    })
+    response = await send()
   } catch {
-    throw new ApiError("Can't reach the server. Check your connection.", 0)
+    // One retry, GET only. The backend is on a free tier that can drop the
+    // first connection while waking, and a single transient failure showing
+    // "Can't reach the server" on an app that's actually fine is worse than
+    // a second of extra wait. Never retried for writes: a POST that failed
+    // *after* the server processed it would double-book the transaction.
+    if (method !== 'GET') throw new ApiError("Can't reach the server. Check your connection.", 0)
+    await new Promise((r) => setTimeout(r, 1200))
+    try {
+      response = await send()
+    } catch {
+      throw new ApiError("Can't reach the server. Check your connection.", 0)
+    }
   }
 
   if (response.status === 401) {
