@@ -119,8 +119,22 @@ CREDIT_RE = re.compile(r"\b(credited|received|refund(?:ed)?|deposited|cashback)\
 VPA_WITH_NAME_RE = re.compile(
     r"\bVPA\s+([\w.\-]+@[\w.\-]+)\s*\(([^)]{2,60})\)", re.IGNORECASE
 )
-VPA_RE = re.compile(r"\bVPA\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE)
+# "VPA arjun@ybl" in a debit alert, but "(VPA: arjun@ybl)" in a credit one —
+# the colon form went unmatched, so credits fell through to a blind search for
+# the first @-looking token anywhere in the message.
+VPA_RE = re.compile(r"\bVPA:?\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE)
 ANY_VPA_RE = re.compile(r"\b([\w.\-]+@[\w.\-]+)")
+
+# Credit alerts name who sent the money, which debit alerts never do:
+#   "b. Sender: VISHNU ARAVIND R G (VPA: rgvishnuaravind@oksbi)"
+# Without this every credit was stored as "Unknown" — and, worse, money moved
+# in from the account holder's OWN other bank looked identical to real income.
+# Capturing the sender means that can be answered once ("my account") and
+# remembered, exactly like any other payee.
+CREDIT_SENDER_RE = re.compile(
+    r"Sender:\s*([^()\n]{2,60}?)\s*\(\s*VPA:?\s*([\w.\-]+@[\w.\-]+)\s*\)",
+    re.IGNORECASE,
+)
 
 # Not every parenthesis after a VPA is a name — plenty of banks put the
 # reference number there instead: "to VPA swiggy@icici (UPI Ref 402913)".
@@ -212,12 +226,19 @@ def parse_sms(text: str) -> dict:
     upi_id = upi_match.group(1).lower() if upi_match else None
 
     merchant = ""
-    # HDFC's "account credited" email template ("...successfully credited to
-    # your HDFC Bank account ending in 9393. Transaction Details: ...") names
-    # no counterparty at all — the generic merchant pattern below would
-    # otherwise grab boilerplate prose ("inform you that Rs") as if it were
-    # one, since "to your ... account" matches its "to <name>" shape.
-    if "successfully credited to your" not in text.lower():
+    # A credit alert names who sent the money — take that, and its VPA as the
+    # identity, so an incoming transfer from the account holder's own other
+    # bank can be recognised rather than counted as income forever.
+    sender = CREDIT_SENDER_RE.search(text)
+    if sender:
+        merchant = _clean_merchant(sender.group(1))
+        upi_id = sender.group(2).lower()
+
+    # HDFC's "account credited" template with no sender line names no
+    # counterparty at all, and the generic patterns below would grab
+    # boilerplate prose ("inform you that Rs") instead, since "to your ...
+    # account" matches their "to <name>" shape.
+    if not merchant and "successfully credited to your" not in text.lower():
         # A parenthesised name beside the VPA beats everything else: it's the
         # only genuinely human-readable merchant the message carries.
         named = VPA_WITH_NAME_RE.search(text)

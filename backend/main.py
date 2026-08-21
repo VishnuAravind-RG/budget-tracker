@@ -268,9 +268,27 @@ def _ingest(text: str, db: Session):
         # "person" and "unclear" still ask, so the safe direction stays the
         # default and only the obvious cases are skipped.
         #
-        # Never applies to credits: a stranger paying you is income either way.
         obvious_business = result["source"] == "ai_confident" and result.get("entity") == "business"
         if payee_key and direction == "debit" and result["source"] != "rule" and not obvious_business:
+            needs_review = True
+
+        # Credits used to be filed as income unconditionally, on the reasoning
+        # that "a stranger paying you is income either way". That is wrong for
+        # the most common credit of all: moving money in from your OWN other
+        # bank. A real Rs 10,000 self-transfer sat counted as income here,
+        # visible only because the alert names the sender —
+        #   "Sender: VISHNU ARAVIND R G (VPA: rgvishnuaravind@oksbi)"
+        # and that VPA belongs to the account holder.
+        #
+        # Scoped to credits carrying a real UPI id, which is what a
+        # person-to-person or own-account transfer looks like. A salary credit
+        # ("by salary transfer from ACME CORP") has only a name-derived key,
+        # is unambiguously income, and must not be dragged into the queue —
+        # a first cut of this asked about those too.
+        #
+        # The answer is durable either way: say "my account" once and every
+        # future transfer from it is classified without asking again.
+        if payee_key and "@" in payee_key and direction == "credit":
             needs_review = True
 
     # Date the transaction when the BANK says it happened, not when we
@@ -635,9 +653,15 @@ def needs_review(db: Session = Depends(get_db)):
 
 
 def _refresh_merchant_names(db: Session) -> int:
-    """Re-derive display names for rows stored before the parser learned to
-    prefer the parenthesised payee name over the VPA. Pure regex, no AI call,
-    so it runs over everything rather than a limited batch.
+    """Re-derive whatever the parser can now read but couldn't when a row was
+    first stored — display names, the bank's reference, the sender of a
+    credit. Pure regex, no AI call, so it runs over everything rather than a
+    limited batch.
+
+    The reference backfill matters most: `bank_ref` was added as a nullable
+    column with no backfill, so every row already in the database had NULL
+    and reference-based dedupe could not protect against a second copy of any
+    of them. That is exactly how a Rs 10,000 credit ended up stored twice.
 
     Only touches rows whose merchant still *is* the parsed VPA — that's proof
     it was auto-derived and never edited by hand, so a name the user typed in
@@ -645,6 +669,31 @@ def _refresh_merchant_names(db: Session) -> int:
     """
     rows = db.query(Transaction).filter(Transaction.raw_text.isnot(None)).all()
     fixed = 0
+
+    # Backfill the bank's reference wherever the alert carries one.
+    for txn in rows:
+        if txn.bank_ref:
+            continue
+        ref = parse_bank_ref(txn.raw_text or "")
+        if ref:
+            txn.bank_ref = ref
+            fixed += 1
+
+    # Credits used to store "Unknown" because the sender line was never read.
+    for txn in rows:
+        if txn.direction != "credit":
+            continue
+        parsed = parse_sms(txn.raw_text or "")
+        better = parsed.get("merchant")
+        if not better or better == "Unknown":
+            continue
+        current = (txn.merchant or "").strip()
+        # Only replace a placeholder, never a name the user typed in Review.
+        if current in ("", "Unknown", "HDFC Bank account credit"):
+            txn.merchant = better
+            if parsed.get("upi_id") and not txn.payee_key:
+                txn.payee_key = parsed["upi_id"]
+            fixed += 1
 
     # Re-date rows that were stamped with their ingestion time instead of the
     # date the bank gave. Only moves a row BACKWARDS in time (an alert cannot

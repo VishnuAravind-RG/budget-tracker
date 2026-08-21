@@ -116,6 +116,35 @@ check("credit direction detected", r["transaction"]["direction"] == "credit", r[
 check("credit auto-filed as Income", r["transaction"]["category"] == "Income", r["transaction"])
 check("credit skips the review queue", r["transaction"]["needs_review"] is False, r["transaction"])
 
+# A credit naming its sender must be ASKED about, not assumed to be income.
+# The most common credit of all is money moved in from your own other bank,
+# and a real Rs 10,000 self-transfer sat counted as income because of this.
+self_txfr = ("Dear Customer, Greetings from HDFC Bank! We're writing to inform you that Rs.10000.00 has been "
+             "successfully credited to your HDFC Bank account ending in 9393. Transaction Details: "
+             "a. Date: 01-08-26 b. Sender: VISHNU ARAVIND R G (VPA: myown@oksbi) "
+             "c. UPI Reference No.: 621312141199")
+r = client.post("/sms/ingest", json={"text": self_txfr}, headers=AUTH).json()
+t = r["transaction"]
+check("credit alert names its sender, not 'Unknown'", t["merchant"] == "VISHNU ARAVIND R G", t)
+check("sender's VPA becomes the identity key", t["payee_key"] == "myown@oksbi", t)
+check("a credit from a new sender is asked about, not assumed income", t["needs_review"] is True, t)
+self_id = t["id"]
+
+# Answering "my account" must reclassify it as a transfer, so it stops
+# counting as income, and must be remembered for next time.
+r = client.patch(f"/transactions/{self_id}/classify",
+                 json={"kind": "self", "label": "My SBI account"}, headers=AUTH).json()
+check("answering 'my account' makes it a transfer", r["kind"] == "transfer", r)
+income_before = client.get("/budget/summary", headers=AUTH).json()["total_income"]
+again = client.post("/sms/ingest", json={"text": self_txfr.replace("621312141199", "621312141200")}, headers=AUTH).json()
+check("the next transfer from that account is not asked again", again["transaction"]["needs_review"] is False, again)
+check("...and is a transfer, not income", again["transaction"]["kind"] == "transfer", again)
+income_after = client.get("/budget/summary", headers=AUTH).json()["total_income"]
+check("a self-transfer never inflates income", abs(income_after - income_before) < 0.01,
+      (income_before, income_after))
+client.delete(f"/transactions/{self_id}", headers=AUTH)
+client.delete(f"/transactions/{again['transaction']['id']}", headers=AUTH)
+
 r = client.post("/sms/ingest", json={"text": "Rs 320 debited for UBER INDIA on 15-08-26"}, headers=AUTH).json()
 check("uber -> Transport", r["transaction"]["category"] == "Transport", r["transaction"])
 check("'debited for X' merchant parsed", r["transaction"]["merchant"] == "UBER INDIA", r["transaction"])
