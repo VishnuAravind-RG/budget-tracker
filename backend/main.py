@@ -786,6 +786,27 @@ def list_payees(db: Session = Depends(get_db)):
     return db.query(Payee).order_by(Payee.created_at.desc()).all()
 
 
+@api.delete("/payees/{key:path}")
+def forget_payee(key: str, db: Session = Depends(get_db)):
+    """Forget one remembered answer, so the next transaction from that
+    counterparty asks again. Without this a mis-tap in Review is permanent
+    and silently keeps mis-filing every future payment from that payee.
+
+    `{key:path}` because keys are UPI ids and `name:<merchant>` strings —
+    both contain characters a plain path segment would refuse.
+
+    Deliberately leaves existing transactions alone: they were classified
+    correctly as far as the user was concerned at the time, and silently
+    rewriting history would move totals under them.
+    """
+    payee = db.get(Payee, key)
+    if not payee:
+        raise HTTPException(404, "Not remembered")
+    db.delete(payee)
+    db.commit()
+    return {"status": "forgotten", "key": key}
+
+
 @api.get("/categories")
 def get_categories():
     return CATEGORIES

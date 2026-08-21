@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { api } from '../api.js'
 import { money } from '../format.js'
+import { TrashIcon } from './Icons.jsx'
 
 const PAYEE_KIND_LABEL = {
   expense: 'Shop',
@@ -16,6 +17,7 @@ export default function Budgets({ categories, limits, spentByCategory, onSave, o
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
   const [payees, setPayees] = useState(null)
+  const [forgetting, setForgetting] = useState('')
 
   useEffect(() => {
     const next = {}
@@ -112,6 +114,24 @@ export default function Budgets({ categories, limits, spentByCategory, onSave, o
                     {p.default_category ? ` · ${p.default_category}` : ''}
                   </div>
                 </div>
+                <button
+                  className="icon-btn"
+                  aria-label={`Forget ${p.label}`}
+                  title="Forget this — the next payment from them will ask again"
+                  disabled={forgetting === p.key}
+                  onClick={async () => {
+                    if (!confirm(`Forget "${p.label}"?\n\nThe next transaction from them will ask who they are again. Existing transactions aren't changed.`)) return
+                    setForgetting(p.key)
+                    try {
+                      await api.forgetPayee(p.key)
+                      setPayees((cur) => cur.filter((x) => x.key !== p.key))
+                    } finally {
+                      setForgetting('')
+                    }
+                  }}
+                >
+                  <TrashIcon />
+                </button>
               </div>
             ))}
           </div>

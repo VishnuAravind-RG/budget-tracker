@@ -119,6 +119,7 @@ export const api = {
 
   // ---- memory ----
   payees: () => request('/payees'),
+  forgetPayee: (key) => request(`/payees/${encodeURIComponent(key)}`, { method: 'DELETE' }),
 
   // ---- lending ----
   lending: () => request('/lending'),

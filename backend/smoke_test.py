@@ -248,6 +248,24 @@ r = client.post("/sms/ingest", json={"text": sms_card2}, headers=AUTH).json()
 check("repeat card-swipe merchant recognised, no review", r["transaction"]["needs_review"] is False, r)
 check("repeat card-swipe merchant gets its remembered category", r["transaction"]["category"] == "Shopping", r)
 
+# --- the memory is visible, and reversible ------------------------------------
+payees = client.get("/payees", headers=AUTH).json()
+check("remembered answers are listable", any(p["label"] == "Arjun" for p in payees), payees)
+arjun_key = next(p["key"] for p in payees if p["label"] == "Arjun")
+check("payee keyed by the VPA, not the display name", arjun_key == "arjun123@ybl", arjun_key)
+
+# A mis-tap in Review must be undoable, or it silently mis-files that payee forever.
+check("forgetting a payee succeeds", client.delete(f"/payees/{arjun_key}", headers=AUTH).status_code == 200)
+check("forgotten payee is gone", all(p["key"] != arjun_key for p in client.get("/payees", headers=AUTH).json()))
+check("forgetting an unknown payee -> 404", client.delete("/payees/nope@nope", headers=AUTH).status_code == 404)
+# Forgetting must NOT rewrite history — those totals are already counted.
+still = client.get("/transactions", headers=AUTH).json()
+check("existing transactions survive forgetting the payee",
+      any(t["counterparty"] == "Arjun" for t in still), "lend row intact")
+# Re-remember so the lending assertions further down still have their payee.
+client.patch(f"/transactions/{p2p_id}/classify",
+             json={"kind": "friend", "label": "Arjun", "remember": True}, headers=AUTH)
+
 # --- kind-aware budgeting: lending/top-ups must NEVER count as spending -------
 # Only the two Corner Store swipes (₹780 + ₹250 = ₹1030) are real spending in
 # this section — the ₹2000 lend, ₹2000 repayment, and ₹1000+₹500 top-ups must
