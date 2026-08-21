@@ -42,6 +42,7 @@ export default function App() {
   const [recurring, setRecurring] = useState([])
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
+  const [wakingUp, setWakingUp] = useState(false)
 
   // A 401 anywhere means the token is dead — drop straight back to login.
   useEffect(() => {
@@ -62,6 +63,11 @@ export default function App() {
   const refresh = useCallback(async () => {
     if (!token) return
     setError('')
+    // The backend runs on Render's free tier. It keeps itself awake now (see
+    // main.py's keep-alive), but a genuine cold start still costs ~60s — and
+    // a bare "Loading…" for a minute reads as a broken app rather than a
+    // waking one. If nothing has come back after 3s, say what's happening.
+    const slowTimer = setTimeout(() => setWakingUp(true), 3000)
     try {
       const [s, tr, tx, rv, lm, ln, recentAll] = await Promise.all([
         api.summary(period.month, period.year),
@@ -84,6 +90,9 @@ export default function App() {
       setRecurring(detectRecurring(recentAll))
     } catch (err) {
       if (err.status !== 401) setError(err.message)
+    } finally {
+      clearTimeout(slowTimer)
+      setWakingUp(false)
     }
   }, [token, period.month, period.year])
 
@@ -210,6 +219,12 @@ export default function App() {
 
       <main>
         {error && <div className="banner error">{error}</div>}
+        {wakingUp && !error && (
+          <div className="banner">
+            Waking up the server — the free hosting tier sleeps when idle, so this
+            first load can take up to a minute. It&apos;s quick after that.
+          </div>
+        )}
 
         {tab === 'home' && (
           <>

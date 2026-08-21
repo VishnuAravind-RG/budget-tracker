@@ -2,6 +2,8 @@ import asyncio
 import os
 import secrets
 import time
+import urllib.request
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -54,7 +56,51 @@ from timeutil import (  # noqa: E402
     utc_now_naive,
 )
 
-app = FastAPI(title="Budget Tracker API")
+# Render's free tier spins the instance down after ~15 minutes with no
+# inbound traffic, and the next request then pays a ~60s cold start — which
+# is exactly what the app's endless "Loading…" was: not slow code, a
+# sleeping server. .github/workflows/keep-alive.yml was meant to prevent
+# this by pinging every 10 minutes, but GitHub silently drops scheduled runs
+# on free repos: real gaps observed between consecutive runs were 34 and 51
+# minutes, far past the spin-down window.
+#
+# So the service keeps itself awake instead. A request to its own *public*
+# URL routes back in through Render's proxy and counts as inbound traffic,
+# which is what resets the idle timer. RENDER_EXTERNAL_URL is injected by
+# Render automatically, so this needs no configuration there and stays off
+# locally (where the variable doesn't exist).
+#
+# Cost note: staying up 24/7 uses ~730 of the free tier's 750 instance
+# hours/month. That fits, but it means this service should be the only free
+# web service in the account, or the hours run out before month end.
+KEEP_ALIVE_URL = os.getenv("KEEP_ALIVE_URL", os.getenv("RENDER_EXTERNAL_URL", "")).strip().rstrip("/")
+KEEP_ALIVE_INTERVAL_SECONDS = 540  # 9 min, comfortably inside the 15 min window
+
+
+async def _keep_awake() -> None:
+    while True:
+        await asyncio.sleep(KEEP_ALIVE_INTERVAL_SECONDS)
+        try:
+            # to_thread: urlopen is blocking, and this runs on the same event
+            # loop that serves every request — same reasoning as /gmail/poll.
+            await asyncio.to_thread(
+                urllib.request.urlopen, f"{KEEP_ALIVE_URL}/health", None, 30
+            )
+        except Exception:
+            # A failed self-ping must never take the server down with it;
+            # the next tick tries again in 9 minutes.
+            pass
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    task = asyncio.create_task(_keep_awake()) if KEEP_ALIVE_URL else None
+    yield
+    if task:
+        task.cancel()
+
+
+app = FastAPI(title="Budget Tracker API", lifespan=lifespan)
 
 # Auth is a bearer token in a header (no cookies), so "*" is safe by default.
 # Set CORS_ORIGINS to your frontend URL once it's deployed to tighten it anyway.
