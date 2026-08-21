@@ -363,6 +363,20 @@ def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
     fallback_category = payload.category or "Uncategorized"
     kind, category, counterparty = _resolve_kind(payload.kind, payload.direction, label, payload.category, fallback_category)
 
+    # Backdating, for logging something after the fact — cash from yesterday,
+    # or a payment no bank ever alerted about. Refused for the future, since
+    # that would put spending in a month that hasn't happened; `ingested_at`
+    # stays "now" regardless, so dedupe and audit order are unaffected.
+    occurred_at = None
+    if payload.occurred_on:
+        y, m, d = (int(part) for part in payload.occurred_on.split("-"))
+        try:
+            occurred_at = local_date_to_utc(y, m, d)
+        except ValueError as exc:
+            raise HTTPException(422, "Not a real date") from exc
+        if occurred_at > utc_now_naive() + timedelta(days=1):
+            raise HTTPException(422, "That date is in the future")
+
     txn = Transaction(
         merchant=label if payload.kind != "expense" else payload.merchant,
         amount=payload.amount,
@@ -373,6 +387,7 @@ def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
         note=(payload.note or "").strip() or None,
         kind=kind,
         counterparty=counterparty,
+        **({"created_at": occurred_at} if occurred_at else {}),
     )
     db.add(txn)
     db.commit()

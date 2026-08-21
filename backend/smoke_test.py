@@ -157,6 +157,23 @@ check("manual expense created", r.status_code == 200, r.text)
 manual_id = r.json()["id"]
 
 bad = client.post("/transactions/manual", json={"amount": -5, "direction": "debit", "category": "Rent"}, headers=AUTH)
+# Backdating: logging something after the fact must land on the day it
+# happened, not today, or it lands in the wrong day (and possibly month).
+r = client.post("/transactions/manual",
+                json={"amount": 60, "direction": "debit", "category": "Groceries",
+                      "merchant": "Backdated Shop", "occurred_on": "2026-08-05"},
+                headers=AUTH).json()
+check("manual entry honours occurred_on", r["created_at"].startswith("2026-08-05"), r["created_at"])
+client.delete(f"/transactions/{r['id']}", headers=AUTH)
+future = client.post("/transactions/manual",
+                     json={"amount": 5, "direction": "debit", "category": "Rent",
+                           "merchant": "Later", "occurred_on": "2099-01-01"}, headers=AUTH)
+check("a future date is refused", future.status_code == 422, future.text)
+bad_fmt = client.post("/transactions/manual",
+                      json={"amount": 5, "direction": "debit", "category": "Rent",
+                            "merchant": "X", "occurred_on": "05-08-2026"}, headers=AUTH)
+check("a malformed date is refused", bad_fmt.status_code == 422, bad_fmt.text)
+
 check("negative amount rejected", bad.status_code == 422, bad.text)
 bad = client.post("/transactions/manual", json={"amount": 5, "direction": "debit", "category": "Nonsense"}, headers=AUTH)
 check("unknown category rejected", bad.status_code == 422, bad.text)

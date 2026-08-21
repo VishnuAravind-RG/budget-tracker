@@ -34,6 +34,10 @@ class ManualTransaction(BaseModel):
     kind: str = "expense"
     counterparty: Optional[str] = Field(default=None, max_length=80)
     note: Optional[str] = Field(default=None, max_length=200)
+    # Local calendar date (YYYY-MM-DD) the spend actually happened, for
+    # logging something after the fact — cash from yesterday, or a payment a
+    # bank never alerted about. Omitted means now.
+    occurred_on: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
     @field_validator("direction")
     @classmethod
