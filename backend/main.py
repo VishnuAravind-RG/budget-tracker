@@ -686,6 +686,11 @@ def _refresh_merchant_names(db: Session) -> int:
     fixed = 0
 
     # Backfill the bank's reference wherever the alert carries one.
+    # The set of taken references is read ONCE. Querying per row instead meant
+    # one round trip per transaction — fine at 175 rows, but this runs on
+    # every repair pass and would grow into a gateway timeout, which is the
+    # same failure that already truncated an earlier bulk pass at 4 of 29.
+    taken = {r[0] for r in db.query(Transaction.bank_ref).filter(Transaction.bank_ref.isnot(None)).all()}
     for txn in rows:
         if txn.bank_ref:
             continue
@@ -693,9 +698,9 @@ def _refresh_merchant_names(db: Session) -> int:
         # Skip a reference another row already claims: bank_ref is UNIQUE, so
         # assigning it twice would abort the whole repair pass. The row keeps
         # a NULL ref and stays visible as the duplicate it is.
-        if ref and not db.query(Transaction).filter(Transaction.bank_ref == ref).first():
+        if ref and ref not in taken:
             txn.bank_ref = ref
-            db.flush()
+            taken.add(ref)
             fixed += 1
 
     # Credits used to store "Unknown" because the sender line was never read.
@@ -765,19 +770,22 @@ def _refresh_merchant_names(db: Session) -> int:
     # the Remembered list would show. Same guard as above: only relabel when
     # the stored label still IS the key, proving it was auto-derived rather
     # than typed by the user in Review.
+    # One pass to collect the best readable name per payee_key, rather than a
+    # query per payee — same round-trip problem as the reference backfill.
+    best_name: dict[str, str] = {}
+    for txn in sorted(
+        db.query(Transaction).filter(Transaction.payee_key.isnot(None)).all(),
+        key=lambda t: t.created_at,
+        reverse=True,
+    ):
+        name = (txn.merchant or "").strip()
+        if name and "@" not in name and name != "Unknown":
+            best_name.setdefault(txn.payee_key, name)
+
     for payee in db.query(Payee).all():
         if (payee.label or "").strip().lower() != payee.key.lower():
             continue
-        named = (
-            db.query(Transaction)
-            .filter(Transaction.payee_key == payee.key, Transaction.merchant.isnot(None))
-            .order_by(Transaction.created_at.desc())
-            .all()
-        )
-        better = next(
-            (t.merchant for t in named if t.merchant and "@" not in t.merchant and t.merchant != "Unknown"),
-            None,
-        )
+        better = best_name.get(payee.key)
         if better:
             payee.label = better
             fixed += 1
