@@ -185,6 +185,56 @@ The explicit requirement was free-forever, no card, anywhere.
   Linux deploy target; only mattered for running the suite locally on
   Windows, but worth keeping so that keeps working too.
 
+## Fixed in the 2026-08-21 session (speed, capture, categorisation)
+
+- **"Endless loading" was a sleeping server, not slow code.** Render's free
+  tier spins down after ~15 min idle; the next request pays a ~60s cold start
+  (measured `/health` at 61s). `.github/workflows/keep-alive.yml` was supposed
+  to prevent it, but **GitHub silently drops scheduled runs on free repos** —
+  observed gaps between consecutive runs were 34 and 51 minutes, far past the
+  spin-down window. Don't trust that cron for anything time-sensitive. The
+  service now self-pings its own `RENDER_EXTERNAL_URL` every 9 min from a
+  lifespan task in `main.py`. Verified: after 12 min of zero external traffic,
+  `/health` answered in **0.38s**. This costs ~744 of the 750 free
+  instance-hours/month, so **it must stay the only free web service in that
+  Render account**.
+- **First paint went 3673ms → 90ms** via `frontend/src/cache.js`: the last
+  successful month is snapshotted to localStorage and painted immediately,
+  with the network refresh overwriting it. Verified it still renders in ~100ms
+  with the API entirely blocked. The cache is deliberately weak — written only
+  after a *fully* successful refresh, never suppresses the fetch,
+  shape-versioned, 3 months max, cleared on sign-out.
+- **The AI was never the problem — the parser was.** `parse_sms()` preferred
+  the VPA over the payee name sitting right beside it in parentheses, so every
+  merchant was stored as `q743985996@ybl`, and *that* opaque handle was what
+  got handed to the categoriser. Nothing can categorise it, so nearly
+  everything fell into review. The name now wins for display and for the AI;
+  the VPA keeps its real job as the identity key, so existing payee memory
+  still matches. Backfilled 44 transaction names and 18 payee labels; review
+  queue went 29 → 12, and the 12 left are all *personal names*, which
+  correctly still need a human answer. **Guard:** some banks put a reference
+  number in those same parentheses (`(UPI Ref 402913)`) —
+  `_looks_like_reference()` rejects those, and an existing test caught the
+  first cut that didn't.
+- **Vercel deployed twice and emailed a failure on every push.** Its own git
+  integration built from the repo root, where there is no `package.json`,
+  while the Actions workflow quietly succeeded and served the real site. Root
+  `vercel.json` points that second build into `frontend/`.
+- **Fuel takes a trip-meter reading now**, not just an odometer — the trip
+  reading at a fill *is* the distance that tankful covered, so mileage comes
+  from one record. First cut was silently dead: the leg filter demanded a
+  distance on both fills, but the earlier one has none by definition (the trip
+  was only just reset). Only the later fill carries distance + litres.
+- **A remembered answer can be forgotten** (`DELETE /payees/{key}` plus a
+  control in the Remembered list). It was a one-way door before: a mis-tap in
+  Review mis-filed that payee forever. Deliberately does not rewrite existing
+  transactions — that would move historical totals under the user.
+- Categoriser order is now Claude → **Azure OpenAI** → Gemini. Gemini's free
+  tier is 20 requests **per day per model** (confirmed from Google's own error
+  body), which cannot survive a backlog pass. Also `gemini-flash-latest`
+  silently resolved to a preview model carrying that tiny quota — **pin the
+  model, never use a `-latest` alias here**.
+
 ## Verification before this was pushed
 
 Both `smoke_test.py` (96 checks) and `test_migration.py` (17 checks) passed
@@ -203,6 +253,24 @@ Action ran and succeeded automatically (it triggers on `frontend/**`
 changes), then fetched the live bundle from Vercel and confirmed its byte
 size matched the local build exactly, plus grepped for new-feature strings
 (`"Log a fill-up"`, `"Money lent out"`) to confirm it wasn't a stale cache.
+
+**As of 2026-08-21:** `smoke_test.py` is at **144 checks**, still passing.
+There is also a browser suite (22 checks, Playwright, driven against real
+production) covering every tab rendering *real content* rather than a
+spinner, the Review and Add lend-vs-settle questions, the fuel trip/odo
+toggle, the Remembered list, an add-then-verify-then-delete round trip, dark
+mode, and a zero-console-errors assertion. Playwright is deliberately **not**
+a repo dependency — install it in the OS temp dir when you need it.
+
+Two habits that paid off and are worth keeping:
+- **Distrust a "deployed" signal that can't distinguish states.** Polling
+  `DELETE /payees/x` for a 404 proved nothing: a missing *route* and a
+  missing *payee* both return 404. Check `openapi.json` for the route, or
+  grep the served bundle for a new string.
+- **When a test fails, decide whether the test or the code is wrong before
+  touching either.** Both happened this session: the `(UPI Ref 402913)` case
+  was a real bug in new code, while `remembered names are readable` was an
+  assertion too absolute for a message that genuinely carries no name.
 
 ## Open questions for the owner — not this session's call to make
 
