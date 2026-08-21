@@ -263,7 +263,9 @@ class FuelFillOut(BaseModel):
 
 
 class MileageLeg(BaseModel):
-    from_fill_id: int
+    # None for a trip-meter leg: it's self-contained in the later fill, so
+    # there is genuinely no earlier fill it was measured against.
+    from_fill_id: Optional[int] = None
     to_fill_id: int
     km: float
     liters: float

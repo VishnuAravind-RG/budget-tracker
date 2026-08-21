@@ -237,12 +237,21 @@ def _ingest(text: str, db: Session):
         result = categorize(merchant, text, direction)
         category = result["category"]
         needs_review = result["needs_review"]
-        # A brand-new counterparty (no rule match, so `categorize` couldn't
-        # have known it's actually a friend or a wallet) — ask once via the
-        # review queue instead of silently filing it as a plain expense,
-        # even when the AI was confident about the category. Never applies
-        # to credits: a stranger paying you is income either way.
-        if payee_key and direction == "debit" and result["source"] != "rule":
+        # A brand-new counterparty could be a friend or a wallet rather than a
+        # shop, and getting that wrong counts lending as spending — so the
+        # default is to ask once via the review queue rather than file it
+        # silently, even when the category itself looked confident.
+        #
+        # The one exception is a name that answers the question by itself:
+        # "INIYA MUGIL SOUP" or "GEETHAM DINE IN 1" is obviously a business,
+        # and making the user tap "A shop" on those is pure noise. Requires
+        # BOTH a confident categorisation and an explicit entity="business";
+        # "person" and "unclear" still ask, so the safe direction stays the
+        # default and only the obvious cases are skipped.
+        #
+        # Never applies to credits: a stranger paying you is income either way.
+        obvious_business = result["source"] == "ai_confident" and result.get("entity") == "business"
+        if payee_key and direction == "debit" and result["source"] != "rule" and not obvious_business:
             needs_review = True
 
     txn = Transaction(
@@ -464,6 +473,19 @@ def _refresh_merchant_names(db: Session) -> int:
             continue  # message carries no better name
         txn.merchant = better
         fixed += 1
+
+    # `counterparty` drives the Lending card's "who owes you what", and it was
+    # copied from `merchant` at classify time — so on anything answered before
+    # this fix it holds the VPA, and the card lists debts against
+    # "scientificmonesh@okhdfcbank" rather than a person's name. Only replaced
+    # when it still looks like a raw handle, never when it's already a name.
+    for txn in db.query(Transaction).filter(Transaction.counterparty.isnot(None)).all():
+        current = (txn.counterparty or "").strip()
+        if "@" not in current:
+            continue  # already a readable name
+        if txn.merchant and "@" not in txn.merchant and txn.merchant != "Unknown":
+            txn.counterparty = txn.merchant
+            fixed += 1
 
     # Payee labels were saved from whatever `merchant` held at the time, so
     # answers given before this fix are stored as the VPA too — which is what
@@ -899,13 +921,14 @@ def fuel_mileage(vehicle_id: str, db: Session = Depends(get_db)):
     number, because only a full-to-full interval guarantees the litres put in
     equal the litres burned over that distance.
 
-    Distance comes from whichever the user actually records:
+    Distance comes from whichever the user actually records, and the two
+    differ in how much they need:
 
-    * `trip_km` on the later fill — a trip meter reset at every fill, so its
-      reading at this fill IS the distance covered on the previous tankful.
-      Preferred, because it needs no arithmetic against the earlier row and
-      so survives a fill that never got logged.
-    * otherwise the odometer difference between the two fills.
+    * `trip_km` is self-contained — ONE full-tank fill is enough, because a
+      trip meter reset at the previous fill already encodes the distance that
+      tankful covered.
+    * an odometer is only a position, so it needs the previous full tank's
+      reading to subtract — that genuinely requires two fills.
 
     A non-positive distance (odometer reset, mistyped entry) is skipped.
     """
@@ -921,32 +944,44 @@ def fuel_mileage(vehicle_id: str, db: Session = Depends(get_db)):
     priced = [f for f in fills if f.liters]
     avg_price = sum(f.amount / f.liters for f in priced) / len(priced) if priced else None
 
-    # Every full-tank fill is a candidate endpoint. Crucially the requirements
-    # differ by end: the EARLIER fill only has to be a full tank (it's just
-    # the "tank was full here" marker — the very first fill of all has no
-    # distance reading at all, because the trip meter was only just reset),
-    # while the LATER one carries the distance and the litres. Requiring a
-    # reading on both ends is what made trip-only logging produce no mileage.
-    full = [f for f in fills if f.is_full_tank]
+    # Two different shapes of leg, because the two ways of recording distance
+    # carry different amounts of information:
+    #
+    # * trip_km is SELF-CONTAINED. Resetting the trip at the last fill means
+    #   its reading now *is* the distance that tankful covered, and the litres
+    #   going in now are what replaced it — so a single full-tank fill gives
+    #   km/L on its own, with no earlier row needed. Demanding a second fill
+    #   here (the odometer rule, wrongly applied) is why a perfectly complete
+    #   entry — 7.94 L, 186.9 km trip — still reported no mileage at all.
+    #   It does assume the tank was full when the trip was reset, which is
+    #   what "reset it at every fill-up" means in practice.
+    #
+    # * An odometer reading is only a position, so it means nothing without
+    #   the previous one to subtract — that genuinely needs two full tanks.
     legs = []
-    for prev, cur in zip(full, full[1:]):
-        if not cur.liters:
+    prev_full = None
+    for f in fills:
+        if not f.is_full_tank:
+            # A partial fill is not an endpoint: the litres put in don't
+            # correspond to a full tank's worth of driving.
             continue
-        if cur.trip_km is not None:
-            km = cur.trip_km
-        elif cur.odometer is not None and prev.odometer is not None:
-            km = cur.odometer - prev.odometer
-        else:
-            continue  # no usable distance for this pair
-        if km <= 0:
-            continue  # odometer reset or bad entry — skip, don't fabricate
+        km = None
+        from_id = None
+        if f.trip_km and f.trip_km > 0:
+            km = f.trip_km
+        elif prev_full is not None and f.odometer is not None and prev_full.odometer is not None:
+            km = f.odometer - prev_full.odometer
+            from_id = prev_full.id
+        prev_full = f
+        if not km or km <= 0 or not f.liters:
+            continue  # odometer reset, missing litres, or bad entry
         legs.append({
-            "from_fill_id": prev.id,
-            "to_fill_id": cur.id,
+            "from_fill_id": from_id,
+            "to_fill_id": f.id,
             "km": km,
-            "liters": cur.liters,
-            "km_per_liter": km / cur.liters,
-            "cost_per_km": cur.amount / km,
+            "liters": f.liters,
+            "km_per_liter": km / f.liters,
+            "cost_per_km": f.amount / km,
         })
 
     avg_mileage = sum(leg["km_per_liter"] for leg in legs) / len(legs) if legs else None

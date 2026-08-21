@@ -47,6 +47,28 @@ CATEGORIES = [
     "Investment", "Transfer", "Income", "Lending", "Other",
 ]
 
+# Whether the counterparty is a business or an individual. This is a SEPARATE
+# question from the category and it's the one that protects the totals: money
+# to a person may be lending, not spending, and must not be auto-counted.
+# Only "business" is ever trusted enough to skip the review queue — "person"
+# and "unclear" both still go and ask. See _ingest() in main.py.
+ENTITY_KINDS = ["business", "person", "unclear"]
+
+_CLASSIFY_PROMPT = (
+    "Classify this Indian bank transaction.\n\n"
+    "Merchant: {merchant}\nSMS text: {raw_text}\n\n"
+    f"category: one of {', '.join(CATEGORIES)}.\n"
+    "confident: false if the merchant is unrecognisable or too ambiguous to categorise.\n"
+    "entity: is the counterparty a business or an individual person?\n"
+    "  - 'business' ONLY if the name clearly identifies a shop, restaurant, company\n"
+    "    or service — e.g. 'INIYA MUGIL SOUP', 'GEETHAM DINE IN 1', 'KP SEASON FRUITS'.\n"
+    "  - 'person' if it reads as an individual's name, including Indian names with\n"
+    "    initials — e.g. 'R MANOHARAN', 'S MEERA', 'VARSHA RS', 'Kamal Pariyar'.\n"
+    "  - 'unclear' if you cannot tell, or it is only a UPI handle or a number.\n"
+    "Be conservative: answer 'unclear' rather than guessing 'business', because a\n"
+    "wrong 'business' silently counts money sent to a friend as spending."
+)
+
 # Fast, free, obvious matches -> skip the AI call entirely for common merchants.
 OBVIOUS_MERCHANTS = {
     "swiggy": "Food & Dining", "zomato": "Food & Dining", "dominos": "Food & Dining",
@@ -257,12 +279,7 @@ def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
     body = {
         "contents": [{
             "parts": [{
-                "text": (
-                    "Classify this Indian bank transaction into exactly one category.\n\n"
-                    f"Merchant: {merchant}\nSMS text: {raw_text}\n\n"
-                    "Set confident=false if the merchant is unrecognisable or the text is "
-                    "too ambiguous to categorise reliably."
-                ),
+                "text": _CLASSIFY_PROMPT.format(merchant=merchant, raw_text=raw_text),
             }],
         }],
         "generationConfig": {
@@ -272,8 +289,9 @@ def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
                 "properties": {
                     "category": {"type": "STRING", "enum": CATEGORIES},
                     "confident": {"type": "BOOLEAN"},
+                    "entity": {"type": "STRING", "enum": ENTITY_KINDS},
                 },
-                "required": ["category", "confident"],
+                "required": ["category", "confident", "entity"],
             },
             # gemini-3.6-flash thinks by default (confirmed live: 65 thinking
             # tokens spent on "reply with the word ok") — real latency for a
@@ -296,7 +314,14 @@ def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
         category = parsed.get("category", "Other")
         if category not in CATEGORIES:
             category = "Other"
-        return {"category": category, "confident": bool(parsed.get("confident", False))}
+        entity = parsed.get("entity")
+        return {
+            "category": category,
+            "confident": bool(parsed.get("confident", False)),
+            # Anything unrecognised falls back to "unclear", never "business" —
+            # the safe direction is always "go and ask".
+            "entity": entity if entity in ENTITY_KINDS else "unclear",
+        }
     except Exception:
         return None
 
@@ -315,12 +340,9 @@ def _azure_categorize(merchant: str, raw_text: str) -> dict | None:
         "messages": [{
             "role": "user",
             "content": (
-                "Classify this Indian bank transaction into exactly one category.\n\n"
-                f"Categories: {', '.join(CATEGORIES)}.\n\n"
-                f"Merchant: {merchant}\nSMS text: {raw_text}\n\n"
-                "Set confident=false if the merchant is unrecognisable or the text is "
-                "too ambiguous to categorise reliably. "
-                'Reply with a JSON object: {"category": string, "confident": bool}'
+                _CLASSIFY_PROMPT.format(merchant=merchant, raw_text=raw_text)
+                + '\n\nReply with a JSON object: '
+                  '{"category": string, "confident": bool, "entity": "business"|"person"|"unclear"}'
             ),
         }],
         "response_format": {"type": "json_object"},
@@ -338,27 +360,35 @@ def _azure_categorize(merchant: str, raw_text: str) -> dict | None:
         category = parsed.get("category", "Other")
         if category not in CATEGORIES:
             category = "Other"
-        return {"category": category, "confident": bool(parsed.get("confident", False))}
+        entity = parsed.get("entity")
+        return {
+            "category": category,
+            "confident": bool(parsed.get("confident", False)),
+            "entity": entity if entity in ENTITY_KINDS else "unclear",
+        }
     except Exception:
         return None
 
 
 def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
-    """Returns {'category', 'needs_review', 'source'}. Cheap path first, AI second.
+    """Returns {'category', 'needs_review', 'source', 'entity'}. Cheap path
+    first, AI second.
 
     `source` tells the caller *why* — main.py needs this to decide whether to
-    also ask "who is this / merchant, friend, wallet, or my own account?":
-    a hardcoded rule match is a definitively known brand (never ask), but an
-    AI-confident guess on a brand-new counterparty still might be a friend or
-    a wallet the AI has no way to know about — see _ingest()'s payee handling.
+    also ask "who is this / merchant, friend, wallet, or my own account?".
+    `entity` is what lets it stop asking when the answer is obvious from the
+    name: "INIYA MUGIL SOUP" is plainly a shop, "R MANOHARAN" plainly isn't.
+    Only a confident "business" skips that question; everything else asks.
     """
     hit = _rule_match(merchant, raw_text)
     if hit:
-        return {"category": hit, "needs_review": False, "source": "rule"}
+        # A hardcoded brand match (Swiggy, Amazon...) is a business by
+        # definition — that's the entire basis of the OBVIOUS_MERCHANTS list.
+        return {"category": hit, "needs_review": False, "source": "rule", "entity": "business"}
 
     if direction == "credit":
         # Money coming in isn't spending — don't burn an AI call or a review slot.
-        return {"category": "Income", "needs_review": False, "source": "income"}
+        return {"category": "Income", "needs_review": False, "source": "income", "entity": "unclear"}
 
     if client is None:
         # No Claude key — try Azure OpenAI first (reliable, no free-tier
@@ -367,11 +397,12 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
         # through the same None contract), before giving up to a review slot.
         result = _azure_categorize(merchant, raw_text) or _gemini_categorize(merchant, raw_text)
         if result is None:
-            return {"category": "Uncategorized", "needs_review": True, "source": "no_ai"}
+            return {"category": "Uncategorized", "needs_review": True, "source": "no_ai", "entity": "unclear"}
         return {
             "category": result["category"],
             "needs_review": not result["confident"],
             "source": "ai_confident" if result["confident"] else "ai_unsure",
+            "entity": result.get("entity", "unclear"),
         }
 
     try:
@@ -388,21 +419,16 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
                         "properties": {
                             "category": {"type": "string", "enum": CATEGORIES},
                             "confident": {"type": "boolean"},
+                            "entity": {"type": "string", "enum": ENTITY_KINDS},
                         },
-                        "required": ["category", "confident"],
+                        "required": ["category", "confident", "entity"],
                         "additionalProperties": False,
                     },
                 },
             },
             messages=[{
                 "role": "user",
-                "content": (
-                    "Classify this Indian bank transaction into exactly one category.\n\n"
-                    f"Merchant: {merchant}\n"
-                    f"SMS text: {raw_text}\n\n"
-                    "Set confident=false if the merchant is unrecognisable or the text is "
-                    "too ambiguous to categorise reliably."
-                ),
+                "content": _CLASSIFY_PROMPT.format(merchant=merchant, raw_text=raw_text),
             }],
         )
         text = next(b.text for b in response.content if b.type == "text")
@@ -411,11 +437,13 @@ def categorize(merchant: str, raw_text: str, direction: str = "debit") -> dict:
         if category not in CATEGORIES:
             category = "Other"
         confident = parsed.get("confident", False)
+        entity = parsed.get("entity")
         return {
             "category": category,
             "needs_review": not confident,
             "source": "ai_confident" if confident else "ai_unsure",
+            "entity": entity if entity in ENTITY_KINDS else "unclear",
         }
     except Exception:
         # Never let a categorization failure lose the transaction.
-        return {"category": "Uncategorized", "needs_review": True, "source": "ai_error"}
+        return {"category": "Uncategorized", "needs_review": True, "source": "ai_error", "entity": "unclear"}

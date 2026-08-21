@@ -332,36 +332,59 @@ check("fuel fill deletable", del_fill.status_code == 200, del_fill.text)
 # odometer, so trip_km alone has to be enough. Reading X km at a fill means the
 # previous tankful covered X km, hence km/L = trip_km / litres of THIS fill.
 client.post("/vehicles", json={"id": "tripbike", "name": "Trip Bike", "type": "motorcycle"}, headers=AUTH)
-client.post("/fuel/fills", json={"vehicle_id": "tripbike", "amount": 300, "liters": 3, "is_full_tank": True}, headers=AUTH)
+
+# ONE fill is enough with a trip meter — the reading already encodes the
+# distance the previous tankful covered, so there is nothing to pair with.
+# Requiring a second fill here made a complete entry report no mileage.
+client.post(
+    "/fuel/fills",
+    json={"vehicle_id": "tripbike", "amount": 925.40, "liters": 7.94, "trip_km": 186.9, "is_full_tank": True},
+    headers=AUTH,
+)
+solo = client.get("/fuel/mileage?vehicle_id=tripbike", headers=AUTH).json()
+check("a single trip-meter fill yields mileage: 186.9km/7.94L = 23.54 km/L",
+      solo["avg_mileage"] is not None and abs(solo["avg_mileage"] - 23.54) < 0.02, solo)
+
 client.post(
     "/fuel/fills",
     json={"vehicle_id": "tripbike", "amount": 400, "liters": 4, "trip_km": 180, "is_full_tank": True},
     headers=AUTH,
 )
 trip_m = client.get("/fuel/mileage?vehicle_id=tripbike", headers=AUTH).json()
-check("mileage works from trip_km with no odometer: 180km/4L = 45 km/L",
-      trip_m["avg_mileage"] == 45.0, trip_m)
+check("second trip fill computes independently: 180km/4L = 45 km/L",
+      any(abs(leg["km_per_liter"] - 45.0) < 0.01 for leg in trip_m["legs"]), trip_m)
+check("trip legs don't need pairing, so both count", len(trip_m["legs"]) == 2, trip_m)
 
-# A partial fill still must not become a leg endpoint, trip meter or not.
+# A partial fill still must not become a leg, trip meter or not: its litres
+# don't correspond to a full tank's worth of driving, so any km/L from it
+# would be fiction. It must not add a leg, nor disturb the two real ones.
 client.post(
     "/fuel/fills",
     json={"vehicle_id": "tripbike", "amount": 100, "liters": 1, "trip_km": 50, "is_full_tank": False},
     headers=AUTH,
 )
 trip_m2 = client.get("/fuel/mileage?vehicle_id=tripbike", headers=AUTH).json()
-check("partial fill ignored for trip-based mileage too", len(trip_m2["legs"]) == 1, trip_m2)
+check("partial fill adds no leg, trip meter or not", len(trip_m2["legs"]) == 2, trip_m2)
+check("partial fill's 50km/1L=50 never appears as a leg",
+      all(abs(leg["km_per_liter"] - 50.0) > 0.01 for leg in trip_m2["legs"]), trip_m2)
+# ...but its litres and cost are still real money and real fuel.
+check("partial fill still counts toward spend and litres",
+      abs(trip_m2["total_liters"] - 12.94) < 0.01, trip_m2)
 
-# A nonsense trip reading must be skipped, never turned into a fake number.
+# A third full fill averages in with the rest, each leg standing alone.
 client.post(
     "/fuel/fills",
     json={"vehicle_id": "tripbike", "amount": 400, "liters": 4, "trip_km": 200, "is_full_tank": True},
     headers=AUTH,
 )
 trip_m3 = client.get("/fuel/mileage?vehicle_id=tripbike", headers=AUTH).json()
-check("a second trip leg computes independently: 200km/4L = 50 km/L",
+check("third trip leg computes independently: 200km/4L = 50 km/L",
       any(abs(leg["km_per_liter"] - 50.0) < 0.01 for leg in trip_m3["legs"]), trip_m3)
-check("trip legs average across both: (45+50)/2 = 47.5",
-      abs(trip_m3["avg_mileage"] - 47.5) < 0.01, trip_m3)
+check("all three trip legs stand alone", len(trip_m3["legs"]) == 3, trip_m3)
+check("avg across the three legs: (23.54+45+50)/3 = 39.51",
+      abs(trip_m3["avg_mileage"] - 39.51) < 0.02, trip_m3)
+check("last_mileage is the most recent leg, not the average",
+      abs(trip_m3["last_mileage"] - 50.0) < 0.01, trip_m3)
 
 # --- to-dos ---------------------------------------------------------------------
 t1 = client.post("/todos", json={"text": "Pay credit card bill"}, headers=AUTH).json()

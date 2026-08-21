@@ -163,7 +163,9 @@ export default function Fuel() {
               <div className="stat-tile">
                 <div className="stat-tile-label">Mileage</div>
                 <div className="stat-tile-value">{mileage.avg_mileage ? `${mileage.avg_mileage.toFixed(1)} km/L` : '—'}</div>
-                <div className="stat-tile-sub">{mileage.legs.length ? `across ${mileage.legs.length} leg${mileage.legs.length === 1 ? '' : 's'}` : 'needs 2 full-tank fills'}</div>
+                {/* One trip-meter fill is enough; only the odometer route
+                    needs a second fill to subtract against. */}
+                <div className="stat-tile-sub">{mileage.legs.length ? `across ${mileage.legs.length} leg${mileage.legs.length === 1 ? '' : 's'}` : 'needs litres + trip km on a full tank'}</div>
               </div>
               <div className="stat-tile">
                 <div className="stat-tile-label">Last fill</div>
