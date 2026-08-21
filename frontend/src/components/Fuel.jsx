@@ -5,6 +5,7 @@ import { BikeIcon, CarIcon, PlusIcon, TrashIcon } from './Icons.jsx'
 
 const VEHICLE_ICON = { scooter: BikeIcon, motorcycle: BikeIcon, car: CarIcon }
 const LAST_PRICE_KEY = 'bt_last_fuel_price'
+const DISTANCE_MODE_KEY = 'bt_fuel_distance_mode'
 
 function deriveLiters(amount, price) {
   const a = Number.parseFloat(amount)
@@ -18,7 +19,12 @@ function FillForm({ vehicleId, onSaved }) {
   const [price, setPrice] = useState(() => localStorage.getItem(LAST_PRICE_KEY) || '')
   const [liters, setLiters] = useState(() => deriveLiters('', localStorage.getItem(LAST_PRICE_KEY) || ''))
   const [litersEdited, setLitersEdited] = useState(false)
-  const [odometer, setOdometer] = useState('')
+  // Trip meter or odometer — either gives mileage, but they're recorded
+  // differently enough that mixing them up would silently corrupt the maths.
+  // Defaults to trip (what most people actually reset at the pump) and
+  // remembers the choice, since nobody switches back and forth.
+  const [distanceMode, setDistanceMode] = useState(() => localStorage.getItem(DISTANCE_MODE_KEY) || 'trip')
+  const [distance, setDistance] = useState('')
   const [isFullTank, setIsFullTank] = useState(true)
   const [busy, setBusy] = useState(false)
 
@@ -37,17 +43,19 @@ function FillForm({ vehicleId, onSaved }) {
     setBusy(true)
     try {
       if (price) localStorage.setItem(LAST_PRICE_KEY, price)
+      const km = distance ? Number.parseFloat(distance) : undefined
       await api.addFuelFill({
         vehicle_id: vehicleId,
         amount: amt,
         liters: liters ? Number.parseFloat(liters) : undefined,
-        odometer: odometer ? Number.parseFloat(odometer) : undefined,
+        trip_km: distanceMode === 'trip' ? km : undefined,
+        odometer: distanceMode === 'odo' ? km : undefined,
         is_full_tank: isFullTank,
       })
       setAmount('')
       setLiters('')
       setLitersEdited(false)
-      setOdometer('')
+      setDistance('')
       onSaved()
     } finally {
       setBusy(false)
@@ -65,7 +73,32 @@ function FillForm({ vehicleId, onSaved }) {
         onChange={(e) => { setLiters(e.target.value); setLitersEdited(true) }}
         style={!litersEdited && price ? { color: 'var(--accent)' } : undefined}
       />
-      <input inputMode="decimal" placeholder="Odometer km" value={odometer} onChange={(e) => setOdometer(e.target.value)} />
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          inputMode="decimal"
+          placeholder={distanceMode === 'trip' ? 'Trip km' : 'Odometer km'}
+          value={distance}
+          onChange={(e) => setDistance(e.target.value)}
+          style={{ flex: 1, minWidth: 0 }}
+        />
+        <button
+          type="button"
+          title={distanceMode === 'trip'
+            ? 'Trip meter: km since your last fill. Tap to enter a full odometer reading instead.'
+            : 'Odometer: total km on the vehicle. Tap to enter trip-meter km instead.'}
+          onClick={() => {
+            const next = distanceMode === 'trip' ? 'odo' : 'trip'
+            setDistanceMode(next)
+            localStorage.setItem(DISTANCE_MODE_KEY, next)
+          }}
+          style={{
+            flex: 'none', padding: '0 10px', fontSize: 11, borderRadius: 9,
+            border: '1px solid var(--axis)', background: 'var(--surface)', color: 'var(--text-2)',
+          }}
+        >
+          {distanceMode === 'trip' ? 'trip' : 'odo'}
+        </button>
+      </div>
       <div className="full-row">
         <button type="button" className="seg" aria-pressed={isFullTank} onClick={() => setIsFullTank((v) => !v)}
           style={{ border: '1px solid var(--axis)', borderRadius: 9, padding: '10px', background: isFullTank ? 'var(--accent)' : 'var(--surface)', color: isFullTank ? '#fff' : 'var(--text-2)', fontSize: 13 }}>
@@ -155,7 +188,7 @@ export default function Fuel() {
               <h2 className="card-title">Log a fill-up</h2>
             </div>
             <div className="card-sub" style={{ marginBottom: 0 }}>
-              Price/L auto-computes litres from the amount. Litres + odometer on every <em>full-tank</em> fill is what makes mileage computable.
+              Price/L auto-computes litres from the amount. Litres + distance on every <em>full-tank</em> fill is what makes mileage computable — trip km (reset at each fill) or a full odometer reading, whichever you actually use.
             </div>
             <FillForm vehicleId={vehicle.id} onSaved={() => refresh(vehicle.id)} />
           </section>
@@ -174,7 +207,7 @@ export default function Fuel() {
                       <div className="row-title">{new Date(f.created_at).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</div>
                       <div className="row-meta">
                         {f.liters ? `${f.liters} L` : 'litres n/a'} · {f.is_full_tank ? 'full tank' : 'partial'}
-                        {f.odometer ? ` · ${f.odometer} km` : ''}
+                        {f.trip_km ? ` · ${f.trip_km} km trip` : f.odometer ? ` · ${f.odometer} km` : ''}
                       </div>
                     </div>
                     <div className="row-amount">{moneyExact(f.amount)}</div>

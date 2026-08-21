@@ -138,6 +138,9 @@ class FuelFillIn(BaseModel):
     amount: float = Field(gt=0)
     liters: Optional[float] = Field(default=None, gt=0)
     odometer: Optional[float] = Field(default=None, ge=0)
+    # Trip-meter distance since the last fill. Either this or `odometer` is
+    # enough for mileage; trip_km wins when both are given (see fuel_mileage).
+    trip_km: Optional[float] = Field(default=None, gt=0)
     is_full_tank: bool = True
     station: Optional[str] = None
 
@@ -249,6 +252,7 @@ class FuelFillOut(BaseModel):
     amount: float
     liters: Optional[float]
     odometer: Optional[float]
+    trip_km: Optional[float] = None
     is_full_tank: bool
     station: Optional[str]
     created_at: datetime

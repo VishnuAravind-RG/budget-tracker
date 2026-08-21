@@ -35,11 +35,20 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 # repayments) would get silently relabelled as spending and inflate every
 # historical month's total. Caught by test_migration.py before this ever
 # touched real data. Kept additive-only — never remove/retype a column here.
-_NEW_TRANSACTION_COLUMNS = [
-    ("kind", "VARCHAR", "CASE WHEN direction = 'credit' THEN 'income' ELSE 'expense' END"),
-    ("payee_key", "VARCHAR", None),
-    ("counterparty", "VARCHAR", None),
-]
+_NEW_COLUMNS_BY_TABLE = {
+    "transactions": [
+        ("kind", "VARCHAR", "CASE WHEN direction = 'credit' THEN 'income' ELSE 'expense' END"),
+        ("payee_key", "VARCHAR", None),
+        ("counterparty", "VARCHAR", None),
+    ],
+    # trip_km: distance since the previous fill, straight off a trip meter
+    # that gets reset at every fill. No backfill — an existing row genuinely
+    # has no trip reading, and inventing one would fabricate mileage. Rows
+    # without it simply fall back to the odometer difference.
+    "fuel_fills": [
+        ("trip_km", "FLOAT", None),
+    ],
+}
 
 
 def _ensure_columns():
@@ -50,19 +59,21 @@ def _ensure_columns():
     not an error.
     """
     inspector = inspect(engine)
-    if "transactions" not in inspector.get_table_names():
-        return  # brand-new database — create_all() already made the final shape
+    tables = set(inspector.get_table_names())
 
-    existing = {c["name"] for c in inspector.get_columns("transactions")}
     with engine.begin() as conn:
-        for name, sql_type, backfill in _NEW_TRANSACTION_COLUMNS:
-            if name in existing:
-                continue
-            conn.execute(text(f"ALTER TABLE transactions ADD COLUMN {name} {sql_type}"))
-            if backfill is not None:
-                # A column-level DEFAULT only applies to *future* inserts in
-                # most engines, not rows already there — backfill explicitly.
-                conn.execute(text(f"UPDATE transactions SET {name} = {backfill} WHERE {name} IS NULL"))
+        for table, columns in _NEW_COLUMNS_BY_TABLE.items():
+            if table not in tables:
+                continue  # brand-new database — create_all() made the final shape
+            existing = {c["name"] for c in inspector.get_columns(table)}
+            for name, sql_type, backfill in columns:
+                if name in existing:
+                    continue
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}"))
+                if backfill is not None:
+                    # A column-level DEFAULT only applies to *future* inserts in
+                    # most engines, not rows already there — backfill explicitly.
+                    conn.execute(text(f"UPDATE {table} SET {name} = {backfill} WHERE {name} IS NULL"))
 
 
 def init_db():

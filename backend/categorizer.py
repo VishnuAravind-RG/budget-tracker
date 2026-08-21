@@ -86,6 +86,34 @@ AMOUNT_RE = re.compile(
 DEBIT_RE = re.compile(r"\b(debited|spent|paid|withdrawn|purchase|sent|deducted)\b", re.IGNORECASE)
 CREDIT_RE = re.compile(r"\b(credited|received|refund(?:ed)?|deposited|cashback)\b", re.IGNORECASE)
 
+# Banks that name the payee put it in parentheses right after the VPA:
+#   "...towards VPA q743985996@ybl (Ss Hyderabad Biriyani Peravallur) on..."
+# That parenthesised name is the only human-readable thing in the message and
+# must win over the VPA itself. Preferring the VPA (as this did originally)
+# meant every merchant was stored and displayed as "q743985996@ybl", and —
+# worse — that opaque string was what got handed to the AI categoriser, which
+# then had nothing to work with and dumped almost everything into review.
+# The VPA is still captured, but as the *identity key*, which is its real job.
+VPA_WITH_NAME_RE = re.compile(
+    r"\bVPA\s+([\w.\-]+@[\w.\-]+)\s*\(([^)]{2,60})\)", re.IGNORECASE
+)
+VPA_RE = re.compile(r"\bVPA\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE)
+ANY_VPA_RE = re.compile(r"\b([\w.\-]+@[\w.\-]+)")
+
+# Not every parenthesis after a VPA is a name — plenty of banks put the
+# reference number there instead: "to VPA swiggy@icici (UPI Ref 402913)".
+# Booking that as the merchant would be worse than falling back to the VPA.
+_REFERENCE_HINT_RE = re.compile(r"\b(?:upi|ref|rrn|txn|transaction)\b", re.IGNORECASE)
+
+
+def _looks_like_reference(value: str) -> bool:
+    if _REFERENCE_HINT_RE.search(value) and re.search(r"\d", value):
+        return True
+    alnum = re.sub(r"[^A-Za-z0-9]", "", value)
+    # Mostly digits is an id, not a shop name — but a real name with a branch
+    # number in it ("FRESH SUPERMARKET PERAMBUR C1") stays well under half.
+    return bool(alnum) and sum(c.isdigit() for c in alnum) / len(alnum) > 0.5
+
 MERCHANT_PATTERNS = [
     re.compile(r"\bVPA\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE),
     re.compile(r"\b(?:to|at|towards|for|from)\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE),
@@ -151,6 +179,12 @@ def parse_sms(text: str) -> dict:
     is_debit = bool(DEBIT_RE.search(text))
     direction = "credit" if (is_credit and not is_debit) else "debit"
 
+    # The VPA is the stable identity, kept separately from the display name —
+    # see VPA_WITH_NAME_RE. Captured even when the name wins as `merchant`,
+    # so "who is this?" memory still keys off something that never changes.
+    upi_match = VPA_RE.search(text) or ANY_VPA_RE.search(text)
+    upi_id = upi_match.group(1).lower() if upi_match else None
+
     merchant = ""
     # HDFC's "account credited" email template ("...successfully credited to
     # your HDFC Bank account ending in 9393. Transaction Details: ...") names
@@ -158,12 +192,18 @@ def parse_sms(text: str) -> dict:
     # otherwise grab boilerplate prose ("inform you that Rs") as if it were
     # one, since "to your ... account" matches its "to <name>" shape.
     if "successfully credited to your" not in text.lower():
-        for pattern in MERCHANT_PATTERNS:
-            found = pattern.search(text)
-            if found:
-                merchant = _clean_merchant(found.group(1))
-                if merchant:
-                    break
+        # A parenthesised name beside the VPA beats everything else: it's the
+        # only genuinely human-readable merchant the message carries.
+        named = VPA_WITH_NAME_RE.search(text)
+        if named and not _looks_like_reference(named.group(2)):
+            merchant = _clean_merchant(named.group(2))
+        if not merchant:
+            for pattern in MERCHANT_PATTERNS:
+                found = pattern.search(text)
+                if found:
+                    merchant = _clean_merchant(found.group(1))
+                    if merchant:
+                        break
 
     is_transaction = (
         amount > 0
@@ -175,6 +215,7 @@ def parse_sms(text: str) -> dict:
         "amount": amount,
         "direction": direction,
         "merchant": merchant or "Unknown",
+        "upi_id": upi_id,
         "is_transaction": is_transaction,
     }
 

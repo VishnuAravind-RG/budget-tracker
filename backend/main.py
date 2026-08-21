@@ -202,7 +202,12 @@ def _ingest(text: str, db: Session):
 
     merchant = parsed["merchant"]
     direction = parsed["direction"]
-    payee_key = payee_key_for(merchant)
+    # Identity keys off the VPA when the message carries one, NOT off the
+    # display name — the name is now the human-readable merchant (e.g.
+    # "Ss Hyderabad Biriyani Peravallur") and a shop can present slightly
+    # different name text across messages, while its VPA is stable. Falls
+    # back to a normalised name key for card swipes, which have no VPA.
+    payee_key = parsed.get("upi_id") or payee_key_for(merchant)
     known: Payee | None = db.get(Payee, payee_key) if payee_key else None
 
     kind = "income" if direction == "credit" else "expense"
@@ -436,7 +441,41 @@ def needs_review(db: Session = Depends(get_db)):
     )
 
 
+def _refresh_merchant_names(db: Session) -> int:
+    """Re-derive display names for rows stored before the parser learned to
+    prefer the parenthesised payee name over the VPA. Pure regex, no AI call,
+    so it runs over everything rather than a limited batch.
+
+    Only touches rows whose merchant still *is* the parsed VPA — that's proof
+    it was auto-derived and never edited by hand, so a name the user typed in
+    Review can't be clobbered.
+    """
+    rows = db.query(Transaction).filter(Transaction.raw_text.isnot(None)).all()
+    fixed = 0
+    for txn in rows:
+        parsed = parse_sms(txn.raw_text or "")
+        better = parsed.get("merchant")
+        upi = parsed.get("upi_id")
+        if not better or better == "Unknown" or not upi:
+            continue
+        if (txn.merchant or "").strip().lower() != upi:
+            continue  # human-edited, or already the readable name
+        if better.lower() == upi:
+            continue  # message carries no better name
+        txn.merchant = better
+        fixed += 1
+    if fixed:
+        db.commit()
+    return fixed
+
+
 def _recategorize_pending_sync(db: Session, limit: int) -> dict:
+    # Names first, and for every row, not just this batch: it's free (regex,
+    # no API call) and the AI pass immediately below is only as good as the
+    # merchant string it's handed — categorising "q743985996@ybl" is
+    # hopeless, categorising "Ss Hyderabad Biriyani Peravallur" is trivial.
+    renamed = _refresh_merchant_names(db)
+
     # Only still-Uncategorized rows, so repeated small batches naturally
     # pick up where the last one left off instead of reprocessing anything
     # already fixed — needed because Render's own gateway kills a request
@@ -462,7 +501,7 @@ def _recategorize_pending_sync(db: Session, limit: int) -> dict:
             txn.category = result["category"]
             updated += 1
     db.commit()
-    return {"checked": len(pending), "updated": updated}
+    return {"checked": len(pending), "updated": updated, "renamed": renamed}
 
 
 @api.post("/transactions/recategorize-pending")
@@ -811,10 +850,21 @@ def delete_fuel_fill(fill_id: int, db: Session = Depends(get_db)):
 
 @api.get("/fuel/mileage", response_model=MileageOut)
 def fuel_mileage(vehicle_id: str, db: Session = Depends(get_db)):
-    """km/L is only derived between two CONSECUTIVE full-tank fills with
-    odometer readings — a partial fill, or an odometer that went backwards
-    (reset or bad entry), is skipped as a leg endpoint rather than producing a
-    fabricated number."""
+    """km/L is only derived between two CONSECUTIVE full-tank fills — a
+    partial fill at either end is skipped rather than producing a fabricated
+    number, because only a full-to-full interval guarantees the litres put in
+    equal the litres burned over that distance.
+
+    Distance comes from whichever the user actually records:
+
+    * `trip_km` on the later fill — a trip meter reset at every fill, so its
+      reading at this fill IS the distance covered on the previous tankful.
+      Preferred, because it needs no arithmetic against the earlier row and
+      so survives a fill that never got logged.
+    * otherwise the odometer difference between the two fills.
+
+    A non-positive distance (odometer reset, mistyped entry) is skipped.
+    """
     fills = (
         db.query(FuelFill)
         .filter(FuelFill.vehicle_id == vehicle_id)
@@ -827,10 +877,22 @@ def fuel_mileage(vehicle_id: str, db: Session = Depends(get_db)):
     priced = [f for f in fills if f.liters]
     avg_price = sum(f.amount / f.liters for f in priced) / len(priced) if priced else None
 
-    full = [f for f in fills if f.is_full_tank and f.odometer is not None and f.liters]
+    # A fill can anchor a leg if it's full-tank with litres recorded, and has
+    # *either* distance source. Note trip_km alone is enough — requiring an
+    # odometer here is what previously made mileage uncomputable for anyone
+    # who only reads a trip meter.
+    full = [
+        f for f in fills
+        if f.is_full_tank and f.liters and (f.odometer is not None or f.trip_km is not None)
+    ]
     legs = []
     for prev, cur in zip(full, full[1:]):
-        km = cur.odometer - prev.odometer
+        if cur.trip_km is not None:
+            km = cur.trip_km
+        elif cur.odometer is not None and prev.odometer is not None:
+            km = cur.odometer - prev.odometer
+        else:
+            continue  # trip meter used on one fill, odometer on the other
         if km <= 0 or not cur.liters:
             continue  # odometer reset or bad entry — skip, don't fabricate
         legs.append({

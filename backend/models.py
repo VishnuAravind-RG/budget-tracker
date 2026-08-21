@@ -84,6 +84,13 @@ class FuelFill(Base):
     amount = Column(Float, nullable=False)
     liters = Column(Float, nullable=True)
     odometer = Column(Float, nullable=True)
+    # Distance since the previous fill, read off a trip meter that's reset at
+    # every fill — the way most people actually track this, rather than
+    # copying a 5-6 digit odometer. Preferred over `odometer` when present:
+    # it needs no arithmetic against the previous row, so it still works when
+    # an earlier fill was never logged. Added after fuel_fills existed in
+    # production — see db.py's _ensure_columns().
+    trip_km = Column(Float, nullable=True)
     is_full_tank = Column(Boolean, nullable=False, default=True)
     station = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)

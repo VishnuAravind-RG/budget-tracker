@@ -84,6 +84,20 @@ p = parse_sms("Your a/c XX123 is debited for Rs 1000 towards NETFLIX on 03-08-26
 check("currency token not read as merchant", p["merchant"] == "NETFLIX", p)
 p = parse_sms("Rs.499.00 debited from A/c XX1234 to VPA swiggy@icici (UPI Ref 402913)")
 check("VPA handle preferred over boilerplate", p["merchant"] == "swiggy@icici", p)
+
+# A parenthesised payee name beats the VPA — it's the only human-readable
+# thing in the message, and it's what the AI categoriser gets handed. Storing
+# the VPA instead ("q743985996@ybl") is why almost everything used to land in
+# review: nothing can categorise an opaque handle.
+p = parse_sms("Rs.280.00 is debited towards VPA q743985996@ybl (Ss Hyderabad Biriyani Peravallur) on 09-08-26.")
+check("payee name preferred over the VPA", p["merchant"] == "Ss Hyderabad Biriyani Peravallur", p)
+check("VPA still captured as the identity key", p["upi_id"] == "q743985996@ybl", p)
+# ...but a reference number in those same parentheses is not a name.
+p = parse_sms("Rs.499.00 debited to VPA swiggy@icici (UPI Ref 402913)")
+check("reference number not mistaken for a payee name", p["merchant"] == "swiggy@icici", p)
+# A branch number inside a real name must not trip the same guard.
+p = parse_sms("Rs.194.00 is debited towards VPA paytm-82809956@ptys (FRESH SUPERMARKET PERAMBUR C1) on 05-08-26.")
+check("name with a branch number survives", p["merchant"] == "FRESH SUPERMARKET PERAMBUR C1", p)
 p = parse_sms("INR 1,250.50 spent on HDFC Card x1234 at MADHURA SWEETS on 2026-08-15")
 check("'at X on' merchant parsed", p["merchant"] == "MADHURA SWEETS", p)
 
