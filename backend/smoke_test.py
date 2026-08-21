@@ -27,7 +27,7 @@ os.environ.setdefault("TZ_NAME", "Asia/Kolkata")
 from fastapi.testclient import TestClient  # noqa: E402
 
 import main  # noqa: E402
-from categorizer import parse_sms  # noqa: E402
+from categorizer import parse_alert_date, parse_sms  # noqa: E402
 
 client = TestClient(main.app)
 AUTH = {"Authorization": "Bearer smoke-test-token"}
@@ -100,6 +100,40 @@ p = parse_sms("Rs.194.00 is debited towards VPA paytm-82809956@ptys (FRESH SUPER
 check("name with a branch number survives", p["merchant"] == "FRESH SUPERMARKET PERAMBUR C1", p)
 p = parse_sms("INR 1,250.50 spent on HDFC Card x1234 at MADHURA SWEETS on 2026-08-15")
 check("'at X on' merchant parsed", p["merchant"] == "MADHURA SWEETS", p)
+
+# Real HDFC debit-card email, footer and all. Two traps in one message:
+#  - "from your HDFC Bank Debit Card" matches the merchant pattern first but
+#    cleans to a stopword, and abandoning the pattern there missed the real
+#    "at FLIPKART PAYMENTS on" later in the same text.
+#  - the footer "We are here to support you in every step of the way" was
+#    captured by an unanchored "to <name>" rule, and this exact alert was
+#    genuinely booked in production with the merchant
+#    "support you in every step of t".
+_card_email = (
+    "Dear Customer, Greetings from HDFC Bank! Rs.127.00 is debited from your "
+    "HDFC Bank Debit Card ending 5564 at FLIPKART PAYMENTS on 19 Aug, 2026 at "
+    "18:34:03. For more details on this transaction, please log in to NetBanking "
+    "-> Accounts. If you did not authorize this transaction, please report it "
+    "immediately at: 1. When in India (Toll free): 1800 258 6161. We are here to "
+    "support you in every step of the way. Warm regards, HDFC Bank"
+)
+p = parse_sms(_card_email)
+check("debit-card email finds the real merchant, not footer prose",
+      p["merchant"] == "FLIPKART PAYMENTS", p)
+check("debit-card email dated from 'on 19 Aug, 2026'",
+      parse_alert_date(_card_email) == (2026, 8, 19), parse_alert_date(_card_email))
+
+# The line-anchored "To <name>" rule must still win over an earlier "From <bank>".
+p = parse_sms("Sent Rs.286.67\nFrom HDFC Bank A/C *9393\nTo VARSHA R S\nOn 19/08/26\nRef 659798226430")
+check("'To <name>' still beats the sender's own bank", p["merchant"] == "VARSHA R S", p)
+
+# ...and footer prose must not beat a real parenthesised payee name either.
+p = parse_sms(
+    "Rs.70.00 is debited from your account ending 9393 towards VPA "
+    "paytm.s1fsral@pty (INIYA MUGIL SOUP) on 20-08-26. We are here to support "
+    "you in every step of the way."
+)
+check("footer prose never beats the payee name", p["merchant"] == "INIYA MUGIL SOUP", p)
 
 # --- manual entry -------------------------------------------------------------
 r = client.post("/transactions/manual", json={"amount": 2000, "direction": "debit", "category": "Rent", "merchant": "Landlord"}, headers=AUTH)

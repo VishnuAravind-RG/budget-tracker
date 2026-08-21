@@ -141,13 +141,17 @@ MERCHANT_PATTERNS = [
     re.compile(r"\b(?:to|at|towards|for|from)\s+([\w.\-]+@[\w.\-]+)", re.IGNORECASE),
     # "Sent Rs.X\nFrom <bank> A/C *nnnn\nTo <name>\n..." — a common bank-SMS
     # shape for a UPI send, where "From" names the SENDER's own bank/account,
-    # not a counterparty. Tried before the general pattern below so "To
-    # <name>" wins over an earlier "From <bank>" match in the same text —
-    # re.search always returns the leftmost match, and "From" precedes "To"
-    # in this template, so without this the sender's bank got captured as
-    # the merchant instead of who the money actually went to.
+    # not a counterparty. Needed because re.search takes the leftmost match
+    # and "From" precedes "To" here, so the general pattern below captured
+    # the sender's own bank as the merchant.
+    #
+    # Anchored to the START OF A LINE, which is what makes it safe. An
+    # unanchored \bto\b matched the word "to" absolutely anywhere, including
+    # inside HDFC's footer — a real card alert was booked with the merchant
+    # "support you in every step of t", lifted from "We're here to support
+    # you in every step of the way."
     re.compile(
-        r"\bto\s+"
+        r"(?:^|\n)\s*to\s+"
         r"(?!(?:rs\.?|inr|₹)\b)"
         r"([A-Za-z][A-Za-z0-9&'.\- ]{1,38}?)"
         r"(?=\s+(?:on|ref|upi|via|dated|txn|a/c|account|bal|avl|towards)\b|[.,;()\n]|$)",
@@ -221,11 +225,18 @@ def parse_sms(text: str) -> dict:
             merchant = _clean_merchant(named.group(2))
         if not merchant:
             for pattern in MERCHANT_PATTERNS:
-                found = pattern.search(text)
-                if found:
+                # finditer, not search: a pattern's FIRST match is often
+                # boilerplate that _clean_merchant rejects ("from your HDFC
+                # Bank Debit Card" -> "your", a stopword). Only looking at
+                # that first match meant one rejected candidate abandoned the
+                # whole pattern, so a perfectly good "at FLIPKART PAYMENTS on"
+                # later in the same message was never even considered.
+                for found in pattern.finditer(text):
                     merchant = _clean_merchant(found.group(1))
                     if merchant:
                         break
+                if merchant:
+                    break
 
     is_transaction = (
         amount > 0
