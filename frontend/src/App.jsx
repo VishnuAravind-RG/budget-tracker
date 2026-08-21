@@ -109,20 +109,23 @@ export default function App() {
     }
   }, [token, period.month, period.year])
 
-  // Paint the last known month instantly, then let refresh() overwrite it.
-  // Runs before/alongside the fetch rather than instead of it — the network
-  // result always wins, this only removes the blank wait in front of it.
+  // Paint the selected month from its own snapshot, then let refresh()
+  // overwrite it. Assigned OUTRIGHT, never merged with what's on screen:
+  // keeping the existing value when a month has no snapshot is what made
+  // stepping back to July show August's ₹36,750 under a "July 2026" header
+  // until the fetch landed — a figure that is simply wrong for the period
+  // it's captioned with. A blank while loading is honest; a confident wrong
+  // number is not.
   useEffect(() => {
     if (!token) return
     const cached = readCache(period.month, period.year)
-    if (!cached) return
-    setSummary((cur) => cur ?? cached.summary)
-    setTrend((cur) => cur ?? cached.trend)
-    setTransactions((cur) => cur ?? cached.transactions)
-    setReview((cur) => cur ?? cached.review)
-    setLending((cur) => cur ?? cached.lending)
-    setLimits((cur) => (cur.length ? cur : cached.limits || []))
-    setRecurring((cur) => (cur.length ? cur : cached.recurring || []))
+    setSummary(cached?.summary ?? null)
+    setTrend(cached?.trend ?? null)
+    setTransactions(cached?.transactions ?? null)
+    setReview(cached?.review ?? null)
+    setLending(cached?.lending ?? null)
+    setLimits(cached?.limits ?? [])
+    setRecurring(cached?.recurring ?? [])
   }, [token, period.month, period.year])
 
   useEffect(() => {

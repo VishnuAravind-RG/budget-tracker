@@ -18,8 +18,16 @@ class SMSPayload(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
 
 
+# A personal tracker will never legitimately see a fifteen-digit figure, but
+# a fat-fingered extra zero is easy and would silently wreck every total and
+# chart it appears in. One crore is far above any realistic personal expense
+# while still catching that class of typo. Applies to hand entry only — an
+# amount parsed from a bank's own alert is whatever the bank says it is.
+MAX_MANUAL_AMOUNT = 10_000_000
+
+
 class ManualTransaction(BaseModel):
-    amount: float = Field(gt=0)
+    amount: float = Field(gt=0, le=MAX_MANUAL_AMOUNT)
     direction: str = "debit"
     # Optional, not required: for kind="friend"/"wallet"/"self" the frontend
     # doesn't show a category picker at all (Lending/Transfer are applied

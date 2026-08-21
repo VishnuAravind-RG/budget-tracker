@@ -229,6 +229,17 @@ bad_fmt = client.post("/transactions/manual",
 check("a malformed date is refused", bad_fmt.status_code == 422, bad_fmt.text)
 
 check("negative amount rejected", bad.status_code == 422, bad.text)
+# A fat-fingered extra zero would silently wreck every total it touches.
+absurd = client.post("/transactions/manual",
+                     json={"amount": 1e15, "direction": "debit", "category": "Rent", "merchant": "Typo"},
+                     headers=AUTH)
+check("an absurd amount is refused", absurd.status_code == 422, absurd.text)
+big_ok = client.post("/transactions/manual",
+                     json={"amount": 250000, "direction": "debit", "category": "Rent", "merchant": "Big But Real"},
+                     headers=AUTH)
+check("a large but plausible amount is still allowed", big_ok.status_code == 200, big_ok.text)
+if big_ok.status_code == 200:
+    client.delete(f"/transactions/{big_ok.json()['id']}", headers=AUTH)
 bad = client.post("/transactions/manual", json={"amount": 5, "direction": "debit", "category": "Nonsense"}, headers=AUTH)
 check("unknown category rejected", bad.status_code == 422, bad.text)
 
