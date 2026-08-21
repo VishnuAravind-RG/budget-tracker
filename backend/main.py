@@ -464,6 +464,29 @@ def _refresh_merchant_names(db: Session) -> int:
             continue  # message carries no better name
         txn.merchant = better
         fixed += 1
+
+    # Payee labels were saved from whatever `merchant` held at the time, so
+    # answers given before this fix are stored as the VPA too — which is what
+    # the Remembered list would show. Same guard as above: only relabel when
+    # the stored label still IS the key, proving it was auto-derived rather
+    # than typed by the user in Review.
+    for payee in db.query(Payee).all():
+        if (payee.label or "").strip().lower() != payee.key.lower():
+            continue
+        named = (
+            db.query(Transaction)
+            .filter(Transaction.payee_key == payee.key, Transaction.merchant.isnot(None))
+            .order_by(Transaction.created_at.desc())
+            .all()
+        )
+        better = next(
+            (t.merchant for t in named if t.merchant and "@" not in t.merchant and t.merchant != "Unknown"),
+            None,
+        )
+        if better:
+            payee.label = better
+            fixed += 1
+
     if fixed:
         db.commit()
     return fixed

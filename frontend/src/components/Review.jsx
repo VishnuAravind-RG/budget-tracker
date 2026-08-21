@@ -135,7 +135,7 @@ export default function Review({ items, categories, onClassify }) {
   return (
     <>
       <div className="banner error">
-        {items.length} transaction{items.length > 1 ? 's' : ''} — who {items.length > 1 ? 'are' : 'is'} this?
+        {items.length} transaction{items.length > 1 ? 's' : ''} — who {items.length > 1 ? 'are these' : 'is this'}?
       </div>
 
       {items.map((t) => (
