@@ -206,6 +206,7 @@ class TransactionOut(BaseModel):
     payee_key: Optional[str] = None
     counterparty: Optional[str] = None
     note: Optional[str] = None
+    bank_ref: Optional[str] = None
 
     @field_serializer("created_at")
     def _utc(self, dt: datetime) -> str:

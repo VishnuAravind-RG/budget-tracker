@@ -45,6 +45,9 @@ class Transaction(Base):
     # tells you nothing months later. Kept separate from `merchant` so it
     # can't corrupt the remembered payee label.
     note = Column(String, nullable=True)
+    # The bank's own transaction reference. Indexed because every ingest looks
+    # it up to reject a payment already recorded through another channel.
+    bank_ref = Column(String, nullable=True, index=True)
 
     __table_args__ = (
         Index("ix_transactions_created_at", "created_at"),

@@ -304,6 +304,23 @@ def parse_alert_date(text: str) -> tuple[int, int, int] | None:
     return None
 
 
+# The bank's own unique id for a transaction. Matching on it is the only
+# reliable way to spot the SAME payment arriving twice through different
+# channels — an SMS and an email describe one payment in different words, so
+# comparing the alert text catches nothing. Two real payments were booked
+# twice this way before this existed.
+_BANK_REF_RE = re.compile(
+    r"(?:reference\s*(?:no\.?|number)?|ref(?:erence)?\s*(?:no\.?)?|rrn|txn\s*id)\s*[:.\-]?\s*(\d{6,20})",
+    re.IGNORECASE,
+)
+
+
+def parse_bank_ref(text: str) -> str | None:
+    """The transaction reference the bank quotes, if the alert carries one."""
+    m = _BANK_REF_RE.search(text)
+    return m.group(1) if m else None
+
+
 _UPI_ID_RE = re.compile(r"^[\w.\-]+@[\w.\-]+$")
 
 

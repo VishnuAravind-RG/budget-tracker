@@ -44,6 +44,7 @@ _NEW_COLUMNS_BY_TABLE = {
         # Backfilled from created_at: for every row written before alerts were
         # date-aware, the two were the same value anyway.
         ("ingested_at", "TIMESTAMP", "created_at"),
+        ("bank_ref", "VARCHAR", None),
     ],
     # trip_km: distance since the previous fill, straight off a trip meter
     # that gets reset at every fill. No backfill — an existing row genuinely

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 import gmail_poll  # noqa: E402
 from auth import AUTH_TOKEN, require_token  # noqa: E402
-from categorizer import CATEGORIES, categorize, parse_alert_date, parse_sms, payee_key_for  # noqa: E402
+from categorizer import CATEGORIES, categorize, parse_alert_date, parse_bank_ref, parse_sms, payee_key_for  # noqa: E402
 from db import get_db, init_db  # noqa: E402
 from models import Budget, FuelFill, GmailAuth, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
 from receipt_scan import ReceiptScanError, gemini_configured, scan_receipt, scan_statement  # noqa: E402
@@ -191,7 +191,20 @@ def _ingest(text: str, db: Session):
         # OTPs, promos, payment reminders. 200 so the phone doesn't retry.
         return {"status": "ignored", "reason": "not a transaction SMS"}
 
-    # MacroDroid retries on flaky mobile data; don't book the same spend twice.
+    # The bank's own reference is checked FIRST and with no time window at
+    # all: the same reference is the same payment, whether the second copy
+    # arrives seconds later as a retry or hours later as the email version of
+    # an SMS already ingested. Text matching alone cannot see that — an SMS
+    # and an email describe one payment in completely different words, which
+    # is exactly how two real payments got booked twice here.
+    bank_ref = parse_bank_ref(text)
+    if bank_ref:
+        already = db.query(Transaction).filter(Transaction.bank_ref == bank_ref).first()
+        if already:
+            return {"status": "duplicate", "transaction": TransactionOut.model_validate(already)}
+
+    # Fallback for alerts carrying no reference: identical text in a short
+    # window, which still covers MacroDroid retrying on flaky mobile data.
     duplicate = (
         db.query(Transaction)
         .filter(
@@ -284,6 +297,7 @@ def _ingest(text: str, db: Session):
         kind=kind,
         payee_key=payee_key,
         counterparty=counterparty,
+        bank_ref=bank_ref,
         **({"created_at": occurred_at} if occurred_at else {}),
     )
     db.add(txn)

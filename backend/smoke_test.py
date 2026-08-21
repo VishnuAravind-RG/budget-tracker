@@ -74,6 +74,31 @@ check("a retry of a back-dated alert is still deduped", again["status"] == "dupl
 # and a probe row left behind would fail them for the wrong reason.
 client.delete(f"/transactions/{first['transaction']['id']}", headers=AUTH)
 
+# The SAME payment arriving through a DIFFERENT channel must be caught. An
+# SMS and an email describe one payment in completely different words, so
+# comparing alert text sees nothing — two real payments were booked twice
+# exactly this way. The bank's own reference is the only reliable identity,
+# and it is honoured with no time window: same reference, same payment, ever.
+sms_form = "Sent Rs.76.00\nFrom HDFC Bank A/C *9393\nTo Ajantha Bakers\nOn 19/08/26\nRef 659721545407"
+email_form = ("Dear Customer, Greetings from HDFC Bank! Rs.76.00 is debited from your account "
+              "ending 9393 towards VPA paytm.s1d7kom@pty (Ajantha Backers-PNS) on 19-08-26. "
+              "UPI transaction reference no.: 659721545407.")
+a = client.post("/sms/ingest", json={"text": sms_form}, headers=AUTH).json()
+check("first channel books the payment", a["status"] == "ok", a)
+check("bank reference captured", a["transaction"]["bank_ref"] == "659721545407", a["transaction"])
+b = client.post("/sms/ingest", json={"text": email_form}, headers=AUTH).json()
+check("same payment via a different channel is deduped", b["status"] == "duplicate", b)
+client.delete(f"/transactions/{a['transaction']['id']}", headers=AUTH)
+
+# Two genuinely different payments to the same shop, same day, same amount
+# must BOTH survive — over-eager dedupe would silently lose real spending.
+p1 = client.post("/sms/ingest", json={"text": "Rs.50.00 debited to VPA shop@ybl (TEA STALL) on 19-08-26. UPI transaction reference no.: 111111111111."}, headers=AUTH).json()
+p2 = client.post("/sms/ingest", json={"text": "Rs.50.00 debited to VPA shop@ybl (TEA STALL) on 19-08-26. UPI transaction reference no.: 222222222222."}, headers=AUTH).json()
+check("different references are kept as separate payments",
+      p1["status"] == "ok" and p2["status"] == "ok", (p1["status"], p2["status"]))
+for x in (p1, p2):
+    client.delete(f"/transactions/{x['transaction']['id']}", headers=AUTH)
+
 r = client.post("/sms/ingest", json={"text": "894213 is your OTP for a transaction of Rs 2000. Do not share."}, headers=AUTH).json()
 check("OTP ignored", r["status"] == "ignored", r)
 
