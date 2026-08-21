@@ -327,6 +327,42 @@ check(
 del_fill = client.delete(f"/fuel/fills/{fill2['id']}", headers=AUTH)
 check("fuel fill deletable", del_fill.status_code == 200, del_fill.text)
 
+# --- mileage from a trip meter (no odometer at all) ------------------------------
+# Most people reset the trip meter at the pump rather than copying a 6-digit
+# odometer, so trip_km alone has to be enough. Reading X km at a fill means the
+# previous tankful covered X km, hence km/L = trip_km / litres of THIS fill.
+client.post("/vehicles", json={"id": "tripbike", "name": "Trip Bike", "type": "motorcycle"}, headers=AUTH)
+client.post("/fuel/fills", json={"vehicle_id": "tripbike", "amount": 300, "liters": 3, "is_full_tank": True}, headers=AUTH)
+client.post(
+    "/fuel/fills",
+    json={"vehicle_id": "tripbike", "amount": 400, "liters": 4, "trip_km": 180, "is_full_tank": True},
+    headers=AUTH,
+)
+trip_m = client.get("/fuel/mileage?vehicle_id=tripbike", headers=AUTH).json()
+check("mileage works from trip_km with no odometer: 180km/4L = 45 km/L",
+      trip_m["avg_mileage"] == 45.0, trip_m)
+
+# A partial fill still must not become a leg endpoint, trip meter or not.
+client.post(
+    "/fuel/fills",
+    json={"vehicle_id": "tripbike", "amount": 100, "liters": 1, "trip_km": 50, "is_full_tank": False},
+    headers=AUTH,
+)
+trip_m2 = client.get("/fuel/mileage?vehicle_id=tripbike", headers=AUTH).json()
+check("partial fill ignored for trip-based mileage too", len(trip_m2["legs"]) == 1, trip_m2)
+
+# A nonsense trip reading must be skipped, never turned into a fake number.
+client.post(
+    "/fuel/fills",
+    json={"vehicle_id": "tripbike", "amount": 400, "liters": 4, "trip_km": 200, "is_full_tank": True},
+    headers=AUTH,
+)
+trip_m3 = client.get("/fuel/mileage?vehicle_id=tripbike", headers=AUTH).json()
+check("a second trip leg computes independently: 200km/4L = 50 km/L",
+      any(abs(leg["km_per_liter"] - 50.0) < 0.01 for leg in trip_m3["legs"]), trip_m3)
+check("trip legs average across both: (45+50)/2 = 47.5",
+      abs(trip_m3["avg_mileage"] - 47.5) < 0.01, trip_m3)
+
 # --- to-dos ---------------------------------------------------------------------
 t1 = client.post("/todos", json={"text": "Pay credit card bill"}, headers=AUTH).json()
 t2 = client.post("/todos", json={"text": "Renew bike insurance"}, headers=AUTH).json()

@@ -921,23 +921,24 @@ def fuel_mileage(vehicle_id: str, db: Session = Depends(get_db)):
     priced = [f for f in fills if f.liters]
     avg_price = sum(f.amount / f.liters for f in priced) / len(priced) if priced else None
 
-    # A fill can anchor a leg if it's full-tank with litres recorded, and has
-    # *either* distance source. Note trip_km alone is enough — requiring an
-    # odometer here is what previously made mileage uncomputable for anyone
-    # who only reads a trip meter.
-    full = [
-        f for f in fills
-        if f.is_full_tank and f.liters and (f.odometer is not None or f.trip_km is not None)
-    ]
+    # Every full-tank fill is a candidate endpoint. Crucially the requirements
+    # differ by end: the EARLIER fill only has to be a full tank (it's just
+    # the "tank was full here" marker — the very first fill of all has no
+    # distance reading at all, because the trip meter was only just reset),
+    # while the LATER one carries the distance and the litres. Requiring a
+    # reading on both ends is what made trip-only logging produce no mileage.
+    full = [f for f in fills if f.is_full_tank]
     legs = []
     for prev, cur in zip(full, full[1:]):
+        if not cur.liters:
+            continue
         if cur.trip_km is not None:
             km = cur.trip_km
         elif cur.odometer is not None and prev.odometer is not None:
             km = cur.odometer - prev.odometer
         else:
-            continue  # trip meter used on one fill, odometer on the other
-        if km <= 0 or not cur.liters:
+            continue  # no usable distance for this pair
+        if km <= 0:
             continue  # odometer reset or bad entry — skip, don't fabricate
         legs.append({
             "from_fill_id": prev.id,
