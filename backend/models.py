@@ -23,8 +23,15 @@ class Transaction(Base):
     category = Column(String, nullable=False, default="Uncategorized")
     source = Column(String, nullable=False, default="manual")  # "sms" | "manual"
     needs_review = Column(Boolean, nullable=False, default=False)  # AI unsure -> user categorizes
-    # Always stored as naive UTC so SQLite and Postgres behave identically.
+    # When the transaction HAPPENED (from the bank's own date when the alert
+    # carries one). Always naive UTC so SQLite and Postgres behave identically.
     created_at = Column(DateTime, nullable=False, default=utc_now_naive)
+    # When this row was WRITTEN. Separate from created_at because that stopped
+    # being "now" once alerts started being dated by the bank: the dedupe
+    # window compares against wall-clock ingestion time, and comparing it to a
+    # back-dated created_at silently matched nothing, so a MacroDroid retry on
+    # flaky mobile data would book the same spend twice.
+    ingested_at = Column(DateTime, nullable=False, default=utc_now_naive)
 
     # Added after the table already existed in production — db.py's
     # _ensure_columns() ALTERs the live table for these, since

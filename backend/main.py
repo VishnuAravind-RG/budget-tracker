@@ -194,7 +194,10 @@ def _ingest(text: str, db: Session):
         db.query(Transaction)
         .filter(
             Transaction.raw_text == text,
-            Transaction.created_at >= utc_now_naive() - DEDUPE_WINDOW,
+            # ingested_at, NOT created_at: created_at is the bank's date now,
+            # so it can sit hours in the past and this window would match
+            # nothing at all — see the ingested_at comment in models.py.
+            Transaction.ingested_at >= utc_now_naive() - DEDUPE_WINDOW,
         )
         .first()
     )

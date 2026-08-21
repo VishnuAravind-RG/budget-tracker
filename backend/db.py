@@ -41,6 +41,9 @@ _NEW_COLUMNS_BY_TABLE = {
         ("payee_key", "VARCHAR", None),
         ("counterparty", "VARCHAR", None),
         ("note", "VARCHAR", None),
+        # Backfilled from created_at: for every row written before alerts were
+        # date-aware, the two were the same value anyway.
+        ("ingested_at", "TIMESTAMP", "created_at"),
     ],
     # trip_km: distance since the previous fill, straight off a trip meter
     # that gets reset at every fill. No backfill — an existing row genuinely

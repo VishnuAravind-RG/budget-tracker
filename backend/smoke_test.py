@@ -58,6 +58,22 @@ check("rule match is confident", r["transaction"]["needs_review"] is False, r["t
 r = client.post("/sms/ingest", json={"text": sms_swiggy}, headers=AUTH).json()
 check("identical SMS deduped", r["status"] == "duplicate", r)
 
+# Dedupe must survive back-dating. Once alerts started being dated by the
+# BANK, created_at could sit hours in the past, so a dedupe window measured
+# against it matched nothing and every MacroDroid retry on flaky mobile data
+# booked the spend twice. This alert carries an explicit date, which is
+# exactly the case that broke.
+dated = "Rs.777.00 debited from A/c XX1234 on 05-08-26 to VPA dedupetest@ybl Ref 900000001"
+first = client.post("/sms/ingest", json={"text": dated}, headers=AUTH).json()
+check("back-dated alert is booked", first["status"] == "ok", first)
+check("...and dated from the alert, not from now",
+      first["transaction"]["created_at"].startswith("2026-08-05"), first["transaction"]["created_at"])
+again = client.post("/sms/ingest", json={"text": dated}, headers=AUTH).json()
+check("a retry of a back-dated alert is still deduped", again["status"] == "duplicate", again)
+# Remove it again: later checks assert exact transaction counts and totals,
+# and a probe row left behind would fail them for the wrong reason.
+client.delete(f"/transactions/{first['transaction']['id']}", headers=AUTH)
+
 r = client.post("/sms/ingest", json={"text": "894213 is your OTP for a transaction of Rs 2000. Do not share."}, headers=AUTH).json()
 check("OTP ignored", r["status"] == "ignored", r)
 
