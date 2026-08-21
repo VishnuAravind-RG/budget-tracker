@@ -81,9 +81,47 @@ def _ensure_columns():
                     conn.execute(text(f"UPDATE {table} SET {name} = {backfill} WHERE {name} IS NULL"))
 
 
+def _ensure_indexes():
+    """A UNIQUE index on bank_ref, so the DATABASE rejects a second copy of a
+    payment rather than the application trying to.
+
+    An application-level "select, then insert if absent" cannot hold under
+    concurrency, and this was not theoretical: six simultaneous copies of one
+    alert all passed the existence check before any of them committed, and
+    Rs 333 was booked six times. MacroDroid genuinely does fire repeatedly on
+    flaky mobile data, which is the case the check existed for.
+
+    NULL is exempt from uniqueness in both SQLite and Postgres, so alerts that
+    carry no reference are unaffected and still fall back to the text-and-time
+    window in _ingest().
+    """
+    inspector = inspect(engine)
+    if "transactions" not in inspector.get_table_names():
+        return
+    if any(ix["name"] == "uq_transactions_bank_ref" for ix in inspector.get_indexes("transactions")):
+        return
+
+    with engine.begin() as conn:
+        # Rows already stored may share a reference (that is how this was
+        # found). Keep the earliest of each group and blank the others' refs
+        # so the index can be built — deliberately NOT deleting anything,
+        # because dropping a user's transaction rows on a startup path is
+        # never worth it. The duplicates stay visible for review.
+        conn.execute(text("""
+            UPDATE transactions SET bank_ref = NULL
+            WHERE bank_ref IS NOT NULL
+              AND id NOT IN (SELECT MIN(id) FROM transactions
+                             WHERE bank_ref IS NOT NULL GROUP BY bank_ref)
+        """))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_transactions_bank_ref ON transactions (bank_ref)"
+        ))
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
+    _ensure_indexes()
 
 
 def get_db():

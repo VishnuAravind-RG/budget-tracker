@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Quer
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
 from sqlalchemy import func  # noqa: E402
+from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 import gmail_poll  # noqa: E402
@@ -320,7 +321,20 @@ def _ingest(text: str, db: Session):
         **({"created_at": occurred_at} if occurred_at else {}),
     )
     db.add(txn)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # The unique index on bank_ref fired: another request inserted this
+        # same payment between our existence check above and this commit.
+        # That check cannot be made safe on its own — six concurrent copies of
+        # one alert once all passed it and booked Rs 333 six times. The
+        # database is the arbiter; losing the race simply means the other
+        # request already stored it.
+        db.rollback()
+        winner = db.query(Transaction).filter(Transaction.bank_ref == bank_ref).first()
+        if winner:
+            return {"status": "duplicate", "transaction": TransactionOut.model_validate(winner)}
+        raise
     db.refresh(txn)
     return {"status": "ok", "transaction": TransactionOut.model_validate(txn)}
 
@@ -676,8 +690,12 @@ def _refresh_merchant_names(db: Session) -> int:
         if txn.bank_ref:
             continue
         ref = parse_bank_ref(txn.raw_text or "")
-        if ref:
+        # Skip a reference another row already claims: bank_ref is UNIQUE, so
+        # assigning it twice would abort the whole repair pass. The row keeps
+        # a NULL ref and stays visible as the duplicate it is.
+        if ref and not db.query(Transaction).filter(Transaction.bank_ref == ref).first():
             txn.bank_ref = ref
+            db.flush()
             fixed += 1
 
     # Credits used to store "Unknown" because the sender line was never read.

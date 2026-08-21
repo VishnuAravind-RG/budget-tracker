@@ -543,6 +543,58 @@ check("settling a debt never counts as spending", abs(spend_after - spend_before
 for tid in (settle_id, again["id"]):
     client.delete(f"/transactions/{tid}", headers=AUTH)
 
+# --- the database itself must reject a duplicate reference --------------------
+# An application-level "check then insert" cannot hold under concurrency, and
+# didn't: six simultaneous copies of one alert all passed the check before any
+# committed, and Rs 333 was booked six times. The guarantee has to live in the
+# schema, so assert the constraint is really there rather than trusting that
+# the sequential path happens to behave.
+from sqlalchemy.exc import IntegrityError as _IntegrityError
+from db import SessionLocal as _SessionLocal
+from models import Transaction as _Txn
+
+_s = _SessionLocal()
+try:
+    _s.add(_Txn(merchant="Ref A", amount=10, direction="debit", category="Other",
+                source="manual", kind="expense", bank_ref="dup-ref-check"))
+    _s.commit()
+    _s.add(_Txn(merchant="Ref B", amount=20, direction="debit", category="Other",
+                source="manual", kind="expense", bank_ref="dup-ref-check"))
+    try:
+        _s.commit()
+        check("the database rejects a second row with the same bank_ref", False,
+              "the insert succeeded - the unique index is missing")
+    except _IntegrityError:
+        _s.rollback()
+        check("the database rejects a second row with the same bank_ref", True)
+
+    # NULL must stay exempt, or every alert without a reference would collide.
+    _s.add(_Txn(merchant="No Ref A", amount=1, direction="debit", category="Other",
+                source="manual", kind="expense", bank_ref=None))
+    _s.add(_Txn(merchant="No Ref B", amount=1, direction="debit", category="Other",
+                source="manual", kind="expense", bank_ref=None))
+    try:
+        _s.commit()
+        check("rows without a reference are still allowed alongside each other", True)
+    except _IntegrityError:
+        _s.rollback()
+        check("rows without a reference are still allowed alongside each other", False,
+              "NULL is being treated as a duplicate")
+finally:
+    for _m in ("Ref A", "Ref B", "No Ref A", "No Ref B"):
+        for _r in _s.query(_Txn).filter(_Txn.merchant == _m).all():
+            _s.delete(_r)
+    _s.commit()
+    _s.close()
+
+# And the ingest path must report it as a duplicate rather than a 500.
+_ref_sms = "Rs.55.00 debited from a/c XXXX1234 on 20-08-26 to VPA refrace@ybl Ref 880000123456"
+_a = client.post("/sms/ingest", json={"text": _ref_sms}, headers=AUTH).json()
+_b = client.post("/sms/ingest", json={"text": _ref_sms + " (email copy)"}, headers=AUTH).json()
+check("a second copy carrying the same reference is reported as duplicate",
+      _b["status"] == "duplicate", _b)
+client.delete(f"/transactions/{_a['transaction']['id']}", headers=AUTH)
+
 # --- timezone boundaries -------------------------------------------------------
 # Timestamps are stored as naive UTC but months and days are cut in local
 # time (IST, +5:30). A spend just before local midnight is over five hours
