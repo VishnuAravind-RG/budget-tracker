@@ -19,6 +19,9 @@ function ReviewItem({ t, categories, onClassify }) {
   // debt you owe (or someone lending to you) doesn't get filed as if you
   // were the one lending money out.
   const [personIntent, setPersonIntent] = useState('lend')
+  // Only asked for when the category is "Other", which explains nothing on
+  // its own — "HARI HARAN AGENCIES 3 · Other" tells you nothing months later.
+  const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
 
   async function save() {
@@ -29,6 +32,7 @@ function ReviewItem({ t, categories, onClassify }) {
         kind: choice === 'friend' && personIntent === 'settle' ? 'friend_settle' : choice,
         label: label.trim() || undefined,
         category: choice === 'expense' ? category : undefined,
+        note: note.trim() || undefined,
         remember: true,
       })
     } finally {
@@ -105,6 +109,17 @@ function ReviewItem({ t, categories, onClassify }) {
                 </button>
               ))}
             </div>
+          )}
+
+          {choice === 'expense' && category === 'Other' && (
+            <input
+              type="text"
+              style={{ marginTop: 8 }}
+              placeholder="What was this? e.g. hardware, gift, repair"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              maxLength={200}
+            />
           )}
 
           <button className="btn" style={{ marginTop: 10 }} onClick={save} disabled={busy}>

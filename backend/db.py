@@ -40,6 +40,7 @@ _NEW_COLUMNS_BY_TABLE = {
         ("kind", "VARCHAR", "CASE WHEN direction = 'credit' THEN 'income' ELSE 'expense' END"),
         ("payee_key", "VARCHAR", None),
         ("counterparty", "VARCHAR", None),
+        ("note", "VARCHAR", None),
     ],
     # trip_km: distance since the previous fill, straight off a trip meter
     # that gets reset at every fill. No backfill — an existing row genuinely

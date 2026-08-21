@@ -51,7 +51,12 @@ export default function Transactions({ transactions, categories, monthLabel, onR
             <div className="row">
               <MerchantLogo name={t.merchant} size={32} />
               <div className="row-main">
-                <div className="row-title">{t.merchant || 'Unknown'}</div>
+                <div className="row-title">
+                  {t.merchant || 'Unknown'}
+                  {/* The whole point of the note is being visible later — an
+                      "Other" row without it is unidentifiable. */}
+                  {t.note && <span style={{ color: 'var(--muted)', fontWeight: 400 }}> · {t.note}</span>}
+                </div>
                 <div className="row-meta">
                   {kindLabel ? (
                     <span className="chip">{kindLabel}</span>

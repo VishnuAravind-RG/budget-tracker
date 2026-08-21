@@ -33,6 +33,11 @@ class Transaction(Base):
     kind = Column(String, nullable=False, default="expense")
     payee_key = Column(String, nullable=True, index=True)  # UPI id, or "name:<merchant>"
     counterparty = Column(String, nullable=True)  # person's display name, for lend/repayment
+    # Free text for what a payment actually was. Matters most for "Other",
+    # where the category carries no meaning at all and a bare merchant name
+    # tells you nothing months later. Kept separate from `merchant` so it
+    # can't corrupt the remembered payee label.
+    note = Column(String, nullable=True)
 
     __table_args__ = (
         Index("ix_transactions_created_at", "created_at"),

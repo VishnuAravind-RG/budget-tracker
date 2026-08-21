@@ -367,6 +367,7 @@ def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
         category=category,
         source="manual",
         needs_review=False,
+        note=(payload.note or "").strip() or None,
         kind=kind,
         counterparty=counterparty,
     )
@@ -476,6 +477,27 @@ def _refresh_merchant_names(db: Session) -> int:
     """
     rows = db.query(Transaction).filter(Transaction.raw_text.isnot(None)).all()
     fixed = 0
+
+    # Re-date rows that were stamped with their ingestion time instead of the
+    # date the bank gave. Only moves a row BACKWARDS in time (an alert cannot
+    # describe the future), and only when the bank's date is a different local
+    # day — so a live SMS ingested minutes after it happened is left alone
+    # rather than being nudged to local noon for no reason.
+    now = utc_now_naive()
+    for txn in rows:
+        alert_date = parse_alert_date(txn.raw_text or "")
+        if not alert_date:
+            continue
+        candidate = local_date_to_utc(*alert_date)
+        if candidate > now or candidate < now - timedelta(days=365):
+            continue
+        if local_day_key(candidate) == local_day_key(txn.created_at):
+            continue
+        if candidate >= txn.created_at:
+            continue  # never push a transaction forward
+        txn.created_at = candidate
+        fixed += 1
+
     for txn in rows:
         parsed = parse_sms(txn.raw_text or "")
         better = parsed.get("merchant")
@@ -619,6 +641,8 @@ def classify_transaction(txn_id: int, payload: TransactionClassify, db: Session 
         payload.kind, txn.direction, label, payload.category, txn.category
     )
     txn.merchant = label
+    if payload.note is not None:
+        txn.note = payload.note.strip() or None
     txn.needs_review = False
 
     if payload.remember and txn.payee_key:

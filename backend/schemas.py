@@ -33,6 +33,7 @@ class ManualTransaction(BaseModel):
     # default) preserves the old plain-expense-or-income behaviour untouched.
     kind: str = "expense"
     counterparty: Optional[str] = Field(default=None, max_length=80)
+    note: Optional[str] = Field(default=None, max_length=200)
 
     @field_validator("direction")
     @classmethod
@@ -81,6 +82,9 @@ class TransactionClassify(BaseModel):
     kind: str
     category: Optional[str] = None
     label: Optional[str] = Field(default=None, max_length=80)
+    # What this actually was, in the user's own words. The UI asks for it when
+    # the category is "Other", which by definition explains nothing.
+    note: Optional[str] = Field(default=None, max_length=200)
     remember: bool = True
 
     @field_validator("kind")
@@ -197,6 +201,7 @@ class TransactionOut(BaseModel):
     kind: str = "expense"
     payee_key: Optional[str] = None
     counterparty: Optional[str] = None
+    note: Optional[str] = None
 
     @field_serializer("created_at")
     def _utc(self, dt: datetime) -> str:

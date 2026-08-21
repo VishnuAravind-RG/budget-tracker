@@ -567,3 +567,20 @@ if failures:
     print(f"{len(failures)} FAILED: {failures}")
     sys.exit(1)
 print("All checks passed.")
+
+# --- a free-text note, for when the category explains nothing --------------------
+# "Other" carries no meaning, so the user's own words are the only record of
+# what a payment actually was. Kept separate from `merchant` so it can never
+# corrupt the remembered payee label.
+client.post("/sms/ingest", json={"text": "Rs.500.00 debited from a/c XXXX1234 on 18-08-26 to VPA notetest@ybl Ref 700000009"}, headers=AUTH)
+note_id = client.get("/transactions/needs-review", headers=AUTH).json()[0]["id"]
+r = client.patch(
+    f"/transactions/{note_id}/classify",
+    json={"kind": "expense", "category": "Other", "label": "HARI HARAN AGENCIES 3", "note": "hardware for the bike"},
+    headers=AUTH,
+).json()
+check("note stored alongside the category", r["note"] == "hardware for the bike", r)
+check("note does not overwrite the merchant name", r["merchant"] == "HARI HARAN AGENCIES 3", r)
+remembered = {p["key"]: p for p in client.get("/payees", headers=AUTH).json()}
+check("remembered label is the merchant, never the note",
+      remembered["notetest@ybl"]["label"] == "HARI HARAN AGENCIES 3", remembered.get("notetest@ybl"))
