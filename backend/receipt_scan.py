@@ -12,6 +12,7 @@ attaches an image — never automatically, never per-keystroke.
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -122,3 +123,119 @@ def scan_receipt(image_bytes: bytes, mime_type: str, note: str | None = None) ->
         parsed["amount"] = 0.0
 
     return parsed
+
+
+STATEMENT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "transactions": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "occurred_on": {
+                        "type": "STRING",
+                        "description": "Date as YYYY-MM-DD. Rows in these apps usually show only a day and month "
+                                       "('21 August'); take the year from the screen's own header if one is shown, "
+                                       "otherwise from the reference year given below. Empty string if truly absent.",
+                    },
+                    "merchant": {"type": "STRING", "description": "Payee name exactly as shown"},
+                    "amount": {"type": "NUMBER", "description": "Plain number, no currency symbol or separators"},
+                    "direction": {"type": "STRING", "enum": ["debit", "credit"]},
+                    "category": {"type": "STRING", "enum": CATEGORIES},
+                },
+                "required": ["occurred_on", "merchant", "amount", "direction", "category"],
+            },
+        },
+    },
+    "required": ["transactions"],
+}
+
+
+def scan_statement(image_bytes: bytes, mime_type: str, reference_year: int) -> list[dict]:
+    """Reads a screenshot of a transaction LIST — GPay/PhonePe history, a bank
+    statement — and returns every row it can see.
+
+    Exists because the alert-based capture is genuinely incomplete: a real
+    GPay history showed six payments (Rs 9,691, including a Rs 7,500 gym fee)
+    that the bank never emailed or texted at all. There is no consumer API
+    for any of these apps, so a screenshot is the only machine-readable form
+    of that data a person can actually get hold of.
+
+    Returns a preview only — nothing is booked. The caller shows the rows for
+    confirmation, because a mis-read amount silently entering the ledger is
+    far worse than one the user glanced at first.
+    """
+    if not gemini_configured():
+        raise ReceiptScanError("GEMINI_API_KEY is not configured")
+
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    prompt = (
+        "This is a screenshot of a list of transactions from a payments app or bank.\n\n"
+        "Extract EVERY transaction row visible. Do not invent rows that are cut off at the "
+        "edge and unreadable, and do not merge two rows into one.\n\n"
+        f"Reference year for dates with no year shown: {reference_year}.\n"
+        "direction is 'debit' for money going out, 'credit' for money coming in. Most rows "
+        "in a payments history are debits.\n"
+        "Pick the best category from the list for each row based on the payee name.\n"
+        "A running total or balance shown in a header is NOT a transaction — skip it."
+    )
+
+    body = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": mime_type, "data": b64}},
+            ],
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": STATEMENT_SCHEMA,
+        },
+    }
+
+    req = urllib.request.Request(
+        f"{ENDPOINT}?key={_api_key}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        # Longer than scan_receipt's: a list of a dozen rows is a much bigger
+        # generation than a single receipt's five fields.
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:300]
+        raise ReceiptScanError(f"Gemini request failed ({e.code}): {detail}") from e
+    except urllib.error.URLError as e:
+        raise ReceiptScanError(f"Couldn't reach Gemini: {e.reason}") from e
+    except TimeoutError as e:
+        raise ReceiptScanError("Gemini took too long on that screenshot — try a shorter one") from e
+    except json.JSONDecodeError as e:
+        raise ReceiptScanError("Gemini returned a response that wasn't valid JSON") from e
+
+    try:
+        text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+        parsed = json.loads(text)
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        raise ReceiptScanError("Gemini returned an unreadable response") from e
+
+    rows = []
+    for item in parsed.get("transactions", []):
+        try:
+            amount = float(item.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if amount <= 0:
+            continue  # a row with no readable amount is not usable
+        category = item.get("category")
+        date = (item.get("occurred_on") or "").strip()
+        rows.append({
+            "occurred_on": date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) else None,
+            "merchant": (item.get("merchant") or "").strip()[:80] or "Unknown",
+            "amount": amount,
+            "direction": item.get("direction") if item.get("direction") in ("debit", "credit") else "debit",
+            "category": category if category in CATEGORIES else "Other",
+        })
+    return rows

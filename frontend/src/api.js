@@ -110,6 +110,13 @@ export const api = {
     if (note) form.append('note', note)
     return request('/ai/scan-receipt', { method: 'POST', body: form })
   },
+  // A screenshot of a transaction LIST -> many rows at once. Preview only;
+  // the caller confirms before anything is written.
+  scanStatement: (file) => {
+    const form = new FormData()
+    form.append('image', file)
+    return request('/ai/scan-statement', { method: 'POST', body: form })
+  },
   summary: (month, year) => request(`/budget/summary${qs({ month, year })}`),
   trend: (month, year) => request(`/stats/daily${qs({ month, year })}`),
   budgetLimits: () => request('/budget/limits'),

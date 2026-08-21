@@ -3,8 +3,9 @@ import { api } from '../api.js'
 import AddExpense from './AddExpense.jsx'
 import ScanReceipt from './ScanReceipt.jsx'
 import PasteAlert from './PasteAlert.jsx'
+import ScanStatement from './ScanStatement.jsx'
 
-export default function AddTransaction({ categories, onAdd, onPasted }) {
+export default function AddTransaction({ categories, onAdd, onPasted, onImported }) {
   const [mode, setMode] = useState('manual')
   const [scanAvailable, setScanAvailable] = useState(null)
 
@@ -24,11 +25,15 @@ export default function AddTransaction({ categories, onAdd, onPasted }) {
         <button type="button" aria-pressed={mode === 'paste'} onClick={() => setMode('paste')}>
           Paste alert
         </button>
+        <button type="button" aria-pressed={mode === 'shot'} onClick={() => setMode('shot')}>
+          Screenshot
+        </button>
       </div>
 
       {mode === 'manual' && <AddExpense categories={categories} onAdd={onAdd} />}
       {mode === 'photo' && <ScanReceipt available={scanAvailable} categories={categories} onAdd={onAdd} />}
       {mode === 'paste' && <PasteAlert onAdded={onPasted} />}
+      {mode === 'shot' && <ScanStatement available={scanAvailable} onImported={onImported} />}
     </>
   )
 }

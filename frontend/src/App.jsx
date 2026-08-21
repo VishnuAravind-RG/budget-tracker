@@ -302,6 +302,11 @@ export default function App() {
           <AddTransaction
             categories={categories}
             onAdd={addManual}
+            onImported={(count) => {
+              setToast(`Imported ${count} transaction${count === 1 ? '' : 's'}`)
+              setTab((current) => (current === 'add' ? 'home' : current))
+              refresh()
+            }}
             onPasted={(txn) => {
               // A pasted alert can land needing review (unrecognised payee)
               // rather than being confirmed outright — say so either way.

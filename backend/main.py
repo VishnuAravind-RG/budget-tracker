@@ -23,7 +23,7 @@ from auth import AUTH_TOKEN, require_token  # noqa: E402
 from categorizer import CATEGORIES, categorize, parse_alert_date, parse_sms, payee_key_for  # noqa: E402
 from db import get_db, init_db  # noqa: E402
 from models import Budget, FuelFill, GmailAuth, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
-from receipt_scan import ReceiptScanError, gemini_configured, scan_receipt  # noqa: E402
+from receipt_scan import ReceiptScanError, gemini_configured, scan_receipt, scan_statement  # noqa: E402
 from schemas import (  # noqa: E402
     BudgetSet,
     BudgetSummary,
@@ -457,6 +457,61 @@ async def scan_receipt_endpoint(
         raise HTTPException(422, "Couldn't read an amount from that image — try a clearer photo")
 
     return result
+
+
+@api.post("/ai/scan-statement")
+async def scan_statement_endpoint(
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Reads a screenshot of a transaction LIST (GPay/PhonePe history, a bank
+    statement) and returns every row found, each flagged with whether it
+    already exists here.
+
+    Necessary because alert-based capture is demonstrably incomplete — a real
+    GPay history showed six payments totalling Rs 9,691 that the bank never
+    emailed or texted. None of these apps expose an API, so a screenshot is
+    the only machine-readable form of that data available.
+
+    Returns a preview; books nothing. The `already_recorded` flag is what
+    makes the screenshot safely re-uploadable: without it, importing the same
+    history twice would silently double every figure.
+    """
+    if not gemini_configured():
+        raise HTTPException(503, "Screenshot scanning isn't set up (no GEMINI_API_KEY on the server)")
+
+    image_bytes = await image.read()
+    if not image_bytes:
+        raise HTTPException(422, "Empty image")
+    if len(image_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, "Image too large (max 8MB)")
+
+    try:
+        rows = await asyncio.to_thread(
+            scan_statement, image_bytes, image.content_type or "image/jpeg", local_now().year
+        )
+    except ReceiptScanError as e:
+        raise HTTPException(502, str(e)) from e
+    except Exception as e:  # noqa: BLE001 — same backstop as /ai/scan-receipt
+        raise HTTPException(502, f"Couldn't read that screenshot: {e}") from e
+
+    if not rows:
+        return {"transactions": []}
+
+    # Flag rows that already exist. Matched on amount + local day, which is
+    # what a person comparing the two lists would use — the merchant string
+    # differs between GPay and the bank's own alert for the same payment
+    # ("Republic Petroleum Station and Co" vs "paytm-30139373@ptys"), so
+    # matching on the name would miss almost every genuine duplicate.
+    existing = db.query(Transaction).filter(Transaction.direction == "debit").all()
+    seen = {(round(t.amount, 2), local_day_key(t.created_at)) for t in existing}
+    for row in rows:
+        row["already_recorded"] = (
+            row["occurred_on"] is not None
+            and (round(row["amount"], 2), row["occurred_on"]) in seen
+        )
+
+    return {"transactions": rows}
 
 
 @api.get("/transactions", response_model=list[TransactionOut])
