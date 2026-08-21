@@ -518,6 +518,31 @@ check("avg across the three legs: (23.54+45+50)/3 = 39.51",
 check("last_mileage is the most recent leg, not the average",
       abs(trip_m3["last_mileage"] - 50.0) < 0.01, trip_m3)
 
+# A payee remembered as "paying back what I owe" (friend_settle) must keep
+# that meaning on their NEXT payment. friend_settle was added to
+# _resolve_kind but not to _ingest's remembered-payee chain, so it matched no
+# branch and fell through to a plain expense — silently counting a debt
+# settlement as spending. Same class of bug as the earlier "merchant" vs
+# "expense" vocabulary mismatch.
+settle_sms = "Rs.900.00 debited from a/c XXXX1234 on 18-08-26 to VPA owedfriend@ybl Ref 730000001"
+r = client.post("/sms/ingest", json={"text": settle_sms}, headers=AUTH).json()
+settle_id = r["transaction"]["id"]
+client.patch(f"/transactions/{settle_id}/classify",
+             json={"kind": "friend_settle", "label": "Owed Friend", "remember": True}, headers=AUTH)
+
+spend_before = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+again = client.post("/sms/ingest",
+                    json={"text": "Rs.400.00 debited from a/c XXXX1234 on 19-08-26 to VPA owedfriend@ybl Ref 730000002"},
+                    headers=AUTH).json()["transaction"]
+check("a remembered debt-settlement payee stays a transfer", again["kind"] == "transfer", again)
+check("...and is not filed as Uncategorized", again["category"] == "Transfer", again)
+check("...and is not asked about again", again["needs_review"] is False, again)
+spend_after = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+check("settling a debt never counts as spending", abs(spend_after - spend_before) < 0.01,
+      (spend_before, spend_after))
+for tid in (settle_id, again["id"]):
+    client.delete(f"/transactions/{tid}", headers=AUTH)
+
 # --- day / week / month review --------------------------------------------------
 # Every figure must filter on kind == "expense". A review screen that counted
 # lending or wallet top-ups would misreport the number looked at most.

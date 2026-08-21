@@ -237,21 +237,22 @@ def _ingest(text: str, db: Session):
 
     if known:
         # Already told what this counterparty is — trust it, never re-ask.
+        #
+        # Delegates to _resolve_kind rather than repeating the mapping, which
+        # is the entire reason that helper exists. This branch used to hand-
+        # roll its own chain and drifted: "friend_settle" (the "paying back
+        # what I owe" answer) was added to _resolve_kind but never here, so it
+        # matched no case, fell through to a plain expense, and silently
+        # counted a debt settlement as spending. Payee.kind and
+        # TransactionClassify.kind share one vocabulary — keep one reader of it.
         note = known.label
-        if known.kind == "friend":
-            kind = "lend" if direction == "debit" else "repayment"
-            counterparty = known.label
-            category = "Lending"
-        elif known.kind == "wallet":
-            kind = "topup" if direction == "debit" else "transfer"
-            category = "Transfer"
-        elif known.kind == "self":
-            kind = "transfer"
-            category = "Transfer"
-        elif known.kind == "expense" and direction == "debit":
-            # Payee.kind uses the same vocabulary as TransactionClassify.kind
-            # ("expense", not "merchant") — see classify_transaction().
-            category = known.default_category or "Uncategorized"
+        # default_category is only ever stored for "expense" payees, and only
+        # meaningful on a debit: a refund from a shop is income, not another
+        # helping of that shop's category.
+        remembered_category = known.default_category if direction == "debit" else None
+        kind, category, counterparty = _resolve_kind(
+            known.kind, direction, known.label, remembered_category, category
+        )
     else:
         result = categorize(merchant, text, direction)
         category = result["category"]
