@@ -230,6 +230,25 @@ export default function App() {
     refresh()
   }
 
+  async function markRepaid(p) {
+    // Ask rather than assume the full amount — a partial cash repayment is
+    // common, and silently clearing the whole debt would lose real money.
+    const raw = prompt(
+      `How much did ${p.person} pay back?\n\nOutstanding: ₹${p.outstanding}\nLeave as-is to settle it fully.`,
+      String(p.outstanding),
+    )
+    if (raw === null) return
+    const value = Number.parseFloat(raw)
+    if (!Number.isFinite(value) || value <= 0) return
+    try {
+      await api.markRepaid(p.person, value)
+      setToast(value >= p.outstanding ? 'Settled up' : 'Part repayment recorded')
+      refresh()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
   const spentByCategory = Object.fromEntries((summary?.categories || []).map((c) => [c.category, c.spent]))
   const reviewCount = review?.length || 0
 
@@ -265,7 +284,12 @@ export default function App() {
               onGoReview={() => setTab('review')}
               onGoBudgets={() => setTab('budgets')}
             />
-            <LendingCard lending={lending} onSnooze={snoozeLending} onClearReminder={clearLendingReminder} />
+            <LendingCard
+              lending={lending}
+              onSnooze={snoozeLending}
+              onClearReminder={clearLendingReminder}
+              onRepaid={markRepaid}
+            />
             <RecurringCard items={recurring} />
           </>
         )}

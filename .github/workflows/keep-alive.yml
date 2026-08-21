@@ -20,9 +20,12 @@ jobs:
     steps:
       - name: Hit the health endpoint
         run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 \
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
             https://budget-tracker-api-jkub.onrender.com/health)
           echo "Backend responded: $code"
           if [ "$code" != "200" ]; then
-            echo "::warning::Backend health check returned $code"
+            # Fail rather than warn — a warning is invisible in the runs list,
+            # so a backend that's actually down still shows a green tick.
+            echo "::error::Backend health check returned $code"
+            exit 1
           fi

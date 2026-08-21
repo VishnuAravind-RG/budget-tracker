@@ -1,7 +1,7 @@
 import { money } from '../format.js'
 import { BellIcon } from './Icons.jsx'
 
-export default function LendingCard({ lending, onSnooze, onClearReminder }) {
+export default function LendingCard({ lending, onSnooze, onClearReminder, onRepaid }) {
   const owing = (lending || []).filter((p) => p.outstanding > 0)
   if (!lending) return null
 
@@ -41,7 +41,14 @@ export default function LendingCard({ lending, onSnooze, onClearReminder }) {
                   </button>
                 )}
               </div>
-              <div className="row-amount">{money(p.outstanding)}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 'none' }}>
+                <div className="row-amount">{money(p.outstanding)}</div>
+                {/* Cash repayments are invisible to the app — there's no bank
+                    alert for them — so without this the debt never clears. */}
+                <button className="lending-repaid" onClick={() => onRepaid(p)}>
+                  repaid
+                </button>
+              </div>
             </div>
           )
         })

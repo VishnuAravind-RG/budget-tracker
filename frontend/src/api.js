@@ -136,6 +136,9 @@ export const api = {
 
   // ---- lending ----
   lending: () => request('/lending'),
+  // Repaid outside the bank (cash) — the app can't see that on its own.
+  markRepaid: (person, amount) =>
+    request(`/lending/${encodeURIComponent(person)}/repaid${qs({ amount })}`, { method: 'POST' }),
   snoozeLendingReminder: (person, days = 3) =>
     request(`/lending/${encodeURIComponent(person)}/snooze${qs({ days })}`, { method: 'POST' }),
   clearLendingReminder: (person) =>

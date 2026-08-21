@@ -419,7 +419,45 @@ arjun2 = next((p for p in lending2 if p["person"] == "Arjun"), None)
 check("next_reminder_at now set", arjun2 and arjun2["next_reminder_at"] is not None, arjun2)
 
 clear_reminder = client.delete("/lending/Arjun/reminder", headers=AUTH)
-check("reminder can be cleared", clear_reminder.status_code == 200, clear_reminder.text)
+# --- repaid in cash --------------------------------------------------------------
+# A cash repayment generates no bank alert, so without an explicit action the
+# debt sits on the Lending card forever and the reminder nags about money
+# that's already back.
+client.post("/sms/ingest", json={"text": "Rs.900.00 debited from a/c XXXX1234 on 18-08-26 to VPA cashfriend@ybl Ref 700000001"}, headers=AUTH)
+cash_id = client.get("/transactions/needs-review", headers=AUTH).json()[0]["id"]
+client.patch(f"/transactions/{cash_id}/classify", json={"kind": "friend", "label": "Cash Friend"}, headers=AUTH)
+bal = {b["person"]: b for b in client.get("/lending", headers=AUTH).json()}
+check("cash friend owes the full amount", bal["Cash Friend"]["outstanding"] == 900.0, bal.get("Cash Friend"))
+
+spent_pre = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+r = client.post("/lending/Cash Friend/repaid?amount=400", headers=AUTH).json()
+check("partial cash repayment books a repayment row", r["kind"] == "repayment" and r["amount"] == 400.0, r)
+bal = {b["person"]: b for b in client.get("/lending", headers=AUTH).json()}
+check("outstanding drops by the partial amount", bal["Cash Friend"]["outstanding"] == 500.0, bal.get("Cash Friend"))
+spent_post = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+check("a repayment is not spending and moves no total", spent_pre == spent_post, (spent_pre, spent_post))
+
+client.post("/lending/Cash Friend/repaid", headers=AUTH)
+bal = {b["person"]: b for b in client.get("/lending", headers=AUTH).json()}
+check("settling the rest clears the debt", bal["Cash Friend"]["outstanding"] == 0.0, bal.get("Cash Friend"))
+check("over-repaying is refused, not silently accepted",
+      client.post("/lending/Cash Friend/repaid?amount=50", headers=AUTH).status_code == 409)
+check("repaid on an unknown person -> 404",
+      client.post("/lending/Nobody At All/repaid", headers=AUTH).status_code == 404)
+
+# --- the date a transaction happened, not the date it was ingested ---------------
+from categorizer import parse_alert_date
+check("HDFC 'on 19-08-26' parsed", parse_alert_date("debited ... on 19-08-26. UPI ref") == (2026, 8, 19))
+check("slash form 'on 19/08/26' parsed", parse_alert_date("To VARSHA\nOn 19/08/26\nRef 1") == (2026, 8, 19))
+check("card format 'on 09 Aug, 2026' parsed", parse_alert_date("at FLIPKART on 09 Aug, 2026 at 13:18:43") == (2026, 8, 9))
+check("ISO 'on 2026-08-15' parsed", parse_alert_date("at MADHURA SWEETS on 2026-08-15") == (2026, 8, 15))
+check("'Date: 18-08-26' parsed", parse_alert_date("Transaction Details: a. Date: 18-08-26 b.") == (2026, 8, 18))
+# A 12-digit UPI reference is a rich source of accidental dates — it must not
+# be mistaken for one, or every transaction gets a fabricated date.
+check("bare reference number is not read as a date", parse_alert_date("UPI transaction reference no.: 659798226430") is None)
+check("impossible date rejected", parse_alert_date("on 31-02-26") is None)
+
+check("reminder can be cleared",clear_reminder.status_code == 200, clear_reminder.text)
 
 # --- historical import (month-only dates, e.g. from an old spreadsheet) -------
 import_items = [

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 import gmail_poll  # noqa: E402
 from auth import AUTH_TOKEN, require_token  # noqa: E402
-from categorizer import CATEGORIES, categorize, parse_sms, payee_key_for  # noqa: E402
+from categorizer import CATEGORIES, categorize, parse_alert_date, parse_sms, payee_key_for  # noqa: E402
 from db import get_db, init_db  # noqa: E402
 from models import Budget, FuelFill, GmailAuth, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
 from receipt_scan import ReceiptScanError, gemini_configured, scan_receipt  # noqa: E402
@@ -49,6 +49,7 @@ from schemas import (  # noqa: E402
 )
 from timeutil import (  # noqa: E402
     days_in_month,
+    local_date_to_utc,
     local_day_key,
     local_now,
     month_anchor_utc,
@@ -254,6 +255,19 @@ def _ingest(text: str, db: Session):
         if payee_key and direction == "debit" and result["source"] != "rule" and not obvious_business:
             needs_review = True
 
+    # Date the transaction when the BANK says it happened, not when we
+    # happened to read the alert. Guarded three ways: a date we can't parse
+    # falls back to now, a future date is rejected outright (a mis-parse, or
+    # a bank writing MM-DD), and anything older than a year is ignored rather
+    # than silently rewriting history far outside the app's own data.
+    occurred_at = None
+    alert_date = parse_alert_date(text)
+    if alert_date:
+        candidate = local_date_to_utc(*alert_date)
+        now = utc_now_naive()
+        if candidate <= now + timedelta(days=1) and candidate >= now - timedelta(days=365):
+            occurred_at = candidate
+
     txn = Transaction(
         raw_text=text,
         merchant=note,
@@ -265,6 +279,7 @@ def _ingest(text: str, db: Session):
         kind=kind,
         payee_key=payee_key,
         counterparty=counterparty,
+        **({"created_at": occurred_at} if occurred_at else {}),
     )
     db.add(txn)
     db.commit()
@@ -806,6 +821,64 @@ def list_payees(db: Session = Depends(get_db)):
     previously invisible: it silently drove classification (new sightings
     of the same payee skip Review) but had no way to actually be seen."""
     return db.query(Payee).order_by(Payee.created_at.desc()).all()
+
+
+@api.post("/lending/{person:path}/repaid", response_model=TransactionOut)
+def record_repayment(
+    person: str,
+    amount: float | None = Query(default=None, gt=0),
+    db: Session = Depends(get_db),
+):
+    """Record that someone paid you back OUTSIDE the bank — in cash, most
+    often. Without this the Lending card can only ever see repayments that
+    happened to arrive as a bank credit, so a debt settled in cash stays on
+    the list forever and the reminder keeps nagging about money already back
+    in your pocket.
+
+    Books a real `repayment` row (not a deletion of the original loan) so the
+    history stays truthful: you lent it, they returned it, both happened.
+    `repayment` is not income and not spending, so no total moves — it only
+    cancels the outstanding balance. Defaults to the full outstanding amount;
+    pass `amount` for a partial repayment.
+    """
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.kind.in_(("lend", "repayment")), Transaction.counterparty == person)
+        .all()
+    )
+    if not rows:
+        raise HTTPException(404, "No lending history with that person")
+
+    outstanding = sum(t.amount if t.kind == "lend" else -t.amount for t in rows)
+    if outstanding <= 0:
+        raise HTTPException(409, "Nothing outstanding with that person")
+
+    value = amount if amount is not None else outstanding
+    if value > outstanding:
+        raise HTTPException(422, f"That's more than the {outstanding:.2f} outstanding")
+
+    txn = Transaction(
+        merchant=person,
+        amount=value,
+        direction="credit",
+        category="Lending",
+        source="manual",
+        needs_review=False,
+        kind="repayment",
+        counterparty=person,
+    )
+    db.add(txn)
+
+    # Fully settled — stop the reminder rather than leaving it to fire about
+    # a debt that no longer exists.
+    if abs(value - outstanding) < 0.01:
+        reminder = db.get(LendingReminder, person)
+        if reminder:
+            db.delete(reminder)
+
+    db.commit()
+    db.refresh(txn)
+    return txn
 
 
 @api.delete("/payees/{key:path}")

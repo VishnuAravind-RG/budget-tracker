@@ -43,6 +43,19 @@ def month_anchor_utc(year: int, month: int) -> datetime:
     return local_noon.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def local_date_to_utc(year: int, month: int, day: int) -> datetime:
+    """Naive-UTC timestamp for noon local time on a specific local date.
+
+    Bank alerts carry a date but no useful time, and the date they mean is
+    the local one. Noon (not midnight) keeps it inside the same local
+    calendar day after the UTC conversion, so a transaction dated the 5th
+    can't drift onto the 4th and land in the wrong day — or, on the 1st of a
+    month, the wrong month's budget.
+    """
+    local_noon = datetime(year, month, day, 12, 0, tzinfo=LOCAL_TZ)
+    return local_noon.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def days_in_month(year: int, month: int) -> int:
     first = datetime(year, month, 1)
     nxt = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)

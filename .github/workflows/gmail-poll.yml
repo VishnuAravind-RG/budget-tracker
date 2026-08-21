@@ -19,12 +19,25 @@ jobs:
         env:
           APP_AUTH_TOKEN: ${{ secrets.APP_AUTH_TOKEN }}
         run: |
-          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" --max-time 60 \
+          # Fail loudly, never quietly. The previous version only emitted a
+          # ::warning:: on a bad response, so a missing APP_AUTH_TOKEN secret
+          # produced a 401 that still reported the run as SUCCESS — every run
+          # looked green for two days while nothing was being ingested at all.
+          # A silent capture pipeline is worse than no capture pipeline: you
+          # believe your spending is being tracked when it isn't.
+          if [ -z "$APP_AUTH_TOKEN" ]; then
+            echo "::error::APP_AUTH_TOKEN repository secret is not set — the poll cannot authenticate."
+            echo "Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          code=$(curl -s -o /tmp/resp.json -w "%{http_code}" --max-time 120 \
             -X POST https://budget-tracker-api-jkub.onrender.com/gmail/poll \
             -H "Authorization: Bearer $APP_AUTH_TOKEN")
           echo "Response ($code):"
           cat /tmp/resp.json
           echo
           if [ "$code" != "200" ]; then
-            echo "::warning::Gmail poll returned $code"
+            echo "::error::Gmail poll returned $code — new bank emails are NOT being captured."
+            exit 1
           fi

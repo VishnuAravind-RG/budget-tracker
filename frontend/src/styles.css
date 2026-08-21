@@ -769,6 +769,17 @@ main {
 }
 .lending-remind.due { color: var(--warn); font-weight: 600; }
 
+.lending-repaid {
+  flex: none;
+  font-size: 11.5px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  border: 1px solid var(--axis);
+  background: var(--surface);
+  color: var(--text-2);
+}
+.lending-repaid:hover { border-color: var(--good); color: var(--good-text); }
+
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }

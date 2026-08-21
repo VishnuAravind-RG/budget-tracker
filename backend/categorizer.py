@@ -242,6 +242,57 @@ def parse_sms(text: str) -> dict:
     }
 
 
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+# Only ever anchored to a keyword ("on", "dated", "Date:"), never a bare
+# number run — a UPI reference like 659798226430 or an account number would
+# otherwise be a rich source of accidental dates.
+_DATE_PATTERNS = [
+    # "on 19-08-26" / "on 19/08/2026" / "Date: 18-08-26"  -> DD MM YY(YY)
+    (re.compile(r"\b(?:on|dated|date:?)\s*(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b", re.IGNORECASE), "dmy"),
+    # "on 2026-08-15"  -> ISO
+    (re.compile(r"\b(?:on|dated|date:?)\s*(\d{4})-(\d{1,2})-(\d{1,2})\b", re.IGNORECASE), "ymd"),
+    # "on 09 Aug, 2026" / "on 9 August 2026"
+    (re.compile(r"\b(?:on|dated|date:?)\s*(\d{1,2})\s+([A-Za-z]{3,9}),?\s+(\d{4})\b", re.IGNORECASE), "dMy"),
+]
+
+
+def parse_alert_date(text: str) -> tuple[int, int, int] | None:
+    """The (year, month, day) the bank says the transaction happened.
+
+    Without this, a transaction's date is whenever it was *ingested*, which
+    is fine for a live SMS but wrong for anything backfilled or delayed — a
+    fortnight of email alerts imported in one go all landed on the import
+    date and drew the spending trend as a flat line then a vertical cliff.
+
+    Returns None rather than guessing; the caller then falls back to now.
+    """
+    for pattern, order in _DATE_PATTERNS:
+        m = pattern.search(text)
+        if not m:
+            continue
+        try:
+            if order == "dmy":
+                day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            elif order == "ymd":
+                year, month, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            else:
+                day = int(m.group(1))
+                month = _MONTHS.get(m.group(2)[:3].lower(), 0)
+                year = int(m.group(3))
+            if year < 100:
+                year += 2000  # "26" -> 2026; Indian bank alerts use 2-digit years
+            if not (1 <= month <= 12 and 1 <= day <= 31 and 2000 <= year <= 2100):
+                continue
+            from datetime import date
+            date(year, month, day)  # rejects 31 Feb and friends
+            return year, month, day
+        except ValueError:
+            continue
+    return None
+
+
 _UPI_ID_RE = re.compile(r"^[\w.\-]+@[\w.\-]+$")
 
 
