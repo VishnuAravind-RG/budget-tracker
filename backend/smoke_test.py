@@ -543,6 +543,42 @@ check("settling a debt never counts as spending", abs(spend_after - spend_before
 for tid in (settle_id, again["id"]):
     client.delete(f"/transactions/{tid}", headers=AUTH)
 
+# --- timezone boundaries -------------------------------------------------------
+# Timestamps are stored as naive UTC but months and days are cut in local
+# time (IST, +5:30). A spend just before local midnight is over five hours
+# EARLIER in UTC, so a window computed in UTC would pull it into the previous
+# day — and on the 1st, the previous month's budget.
+from datetime import datetime, timedelta, timezone as _tz
+from timeutil import LOCAL_TZ, local_day_key, month_range_utc, period_range_utc
+
+def as_stored(y, mo, d, hh, mm):
+    """A local wall-clock moment, as it would be stored (naive UTC)."""
+    return datetime(y, mo, d, hh, mm, tzinfo=LOCAL_TZ).astimezone(_tz.utc).replace(tzinfo=None)
+
+late_aug = as_stored(2026, 8, 31, 23, 59)      # last minute of August, locally
+early_sep = as_stored(2026, 9, 1, 0, 1)        # first minute of September
+aug_s, aug_e = month_range_utc(2026, 8)
+sep_s, sep_e = month_range_utc(2026, 9)
+check("23:59 on 31 Aug local falls inside August", aug_s <= late_aug < aug_e, (late_aug, aug_s, aug_e))
+check("...and NOT inside September", not (sep_s <= late_aug < sep_e), late_aug)
+check("00:01 on 1 Sep local falls inside September", sep_s <= early_sep < sep_e, (early_sep, sep_s, sep_e))
+check("...and NOT inside August", not (aug_s <= early_sep < aug_e), early_sep)
+check("a near-midnight spend keeps its LOCAL day", local_day_key(late_aug) == "2026-08-31", local_day_key(late_aug))
+check("a just-past-midnight spend keeps its LOCAL day", local_day_key(early_sep) == "2026-09-01", local_day_key(early_sep))
+
+# Month windows must tile without gaps or overlaps, or spend falls between them.
+check("August ends exactly where September begins", aug_e == sep_s, (aug_e, sep_s))
+jul_s, jul_e = month_range_utc(2026, 7)
+check("July ends exactly where August begins", jul_e == aug_s, (jul_e, aug_s))
+
+# Day windows must be exactly 24h apart and tile too.
+d0s, d0e = period_range_utc("day", 0)
+d1s, d1e = period_range_utc("day", 1)
+check("a day window is exactly 24 hours", d0e - d0s == timedelta(days=1), d0e - d0s)
+check("yesterday ends where today begins", d1e == d0s, (d1e, d0s))
+w0s, w0e = period_range_utc("week", 0)
+check("a week window is exactly 7 days", w0e - w0s == timedelta(days=7), w0e - w0s)
+
 # --- day / week / month review --------------------------------------------------
 # Every figure must filter on kind == "expense". A review screen that counted
 # lending or wallet top-ups would misreport the number looked at most.
