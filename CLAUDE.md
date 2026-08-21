@@ -235,6 +235,44 @@ The explicit requirement was free-forever, no card, anywhere.
   silently resolved to a preview model carrying that tiny quota — **pin the
   model, never use a `-latest` alias here**.
 
+### Later the same day — dates, dedupe, and two self-inflicted bugs
+
+- **A transaction was dated when it was INGESTED, not when it happened.**
+  Fine for a live SMS, wrong for anything backfilled: a fortnight of email
+  alerts imported in one go all landed on the import date, drawing the
+  spending trend as a flat line and then a vertical cliff.
+  `parse_alert_date()` now reads the bank's own date (four formats) and books
+  against it. Guarded: unparseable falls back to now, future dates are
+  rejected as mis-parses, and a bare 12-digit UPI reference must never be
+  read as a date.
+- **That immediately broke dedupe, silently.** The duplicate check compared
+  `created_at >= now - 120s`, and `created_at` had just become a date hours
+  in the past — so it matched nothing and every repeat of an identical alert
+  was booked again. MacroDroid retries on flaky mobile data, which is exactly
+  what that window exists to absorb, so this would have **double-counted real
+  spending**. Fixed by splitting the two meanings: `created_at` = when it
+  happened, `ingested_at` = when the row was written, dedupe uses the latter.
+  *Lesson: when a field's meaning changes, grep every comparison against it.*
+- **Bank footer prose was parsed as a merchant name** — a real card alert was
+  booked as "support you in every step of t", from HDFC's sign-off. Two
+  causes: the `To <name>` rule added for the Sent/From/To SMS shape matched
+  "to" anywhere (now anchored to start-of-line), and the merchant loop only
+  examined each pattern's *first* match, so one rejected candidate abandoned
+  the whole pattern — `finditer`, not `search`.
+- **The Gmail poll workflow reported SUCCESS while returning 401 for two
+  days.** It only emitted `::warning::` on failure, which does not fail a
+  job. Nothing was being captured while every run showed a green tick. Both
+  workflows now `exit 1`, and the poll says explicitly when `APP_AUTH_TOKEN`
+  is missing. **A silent capture pipeline is worse than none** — you believe
+  your spending is tracked when it isn't.
+- Mileage: **one trip-meter fill is enough.** A trip reading is
+  self-contained (reset at the last fill, it already encodes that tankful's
+  distance); only the odometer route needs two readings to subtract. Applying
+  the odometer rule to trip data made a complete entry report no mileage.
+- Added: a free-text `note` (asked for when the category is "Other", which
+  explains nothing), and `POST /lending/{person}/repaid` for cash repayments
+  — previously untrackable, so a settled debt nagged forever.
+
 ## Verification before this was pushed
 
 Both `smoke_test.py` (96 checks) and `test_migration.py` (17 checks) passed
@@ -254,7 +292,7 @@ changes), then fetched the live bundle from Vercel and confirmed its byte
 size matched the local build exactly, plus grepped for new-feature strings
 (`"Log a fill-up"`, `"Money lent out"`) to confirm it wasn't a stale cache.
 
-**As of 2026-08-21:** `smoke_test.py` is at **144 checks**, still passing.
+**As of 2026-08-21 (end of session):** `smoke_test.py` is at **174 checks**, still passing.
 There is also a browser suite (22 checks, Playwright, driven against real
 production) covering every tab rendering *real content* rather than a
 spinner, the Review and Add lend-vs-settle questions, the fuel trip/odo
@@ -267,6 +305,9 @@ Two habits that paid off and are worth keeping:
   `DELETE /payees/x` for a 404 proved nothing: a missing *route* and a
   missing *payee* both return 404. Check `openapi.json` for the route, or
   grep the served bundle for a new string.
+- **A green CI tick proves nothing unless the job can actually go red.** Two
+  separate jobs here reported success while doing nothing, because a
+  `::warning::` does not fail a run.
 - **When a test fails, decide whether the test or the code is wrong before
   touching either.** Both happened this session: the `(UPI Ref 402913)` case
   was a real bug in new code, while `remembered names are readable` was an
