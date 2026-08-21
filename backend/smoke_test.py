@@ -453,6 +453,47 @@ check("avg across the three legs: (23.54+45+50)/3 = 39.51",
 check("last_mileage is the most recent leg, not the average",
       abs(trip_m3["last_mileage"] - 50.0) < 0.01, trip_m3)
 
+# --- day / week / month review --------------------------------------------------
+# Every figure must filter on kind == "expense". A review screen that counted
+# lending or wallet top-ups would misreport the number looked at most.
+for p_ in ("day", "week", "month"):
+    r = client.get(f"/stats/summary?period={p_}", headers=AUTH)
+    check(f"{p_} summary responds", r.status_code == 200, r.text)
+    body = r.json()
+    check(f"{p_} summary has a label", bool(body["label"]), body)
+    check(f"{p_} totals are never negative", body["total_spent"] >= 0, body)
+
+check("an unknown period is rejected",
+      client.get("/stats/summary?period=fortnight", headers=AUTH).status_code == 422)
+
+# A month window must agree with the month view that already exists — two
+# different code paths reporting different totals for the same month would be
+# worse than having no review screen at all.
+month_sum = client.get("/stats/summary?period=month", headers=AUTH).json()
+budget_sum = client.get("/budget/summary", headers=AUTH).json()
+check("month review agrees with the budget summary",
+      abs(month_sum["total_spent"] - budget_sum["total_spent"]) < 0.01,
+      (month_sum["total_spent"], budget_sum["total_spent"]))
+
+# Lending must not leak into the review totals.
+before_rev = client.get("/stats/summary?period=month", headers=AUTH).json()["total_spent"]
+lend = client.post("/transactions/manual",
+                   json={"amount": 3000, "direction": "debit", "kind": "friend",
+                         "merchant": "Review Leak Test"}, headers=AUTH).json()
+after_rev = client.get("/stats/summary?period=month", headers=AUTH).json()["total_spent"]
+check("lending does not move the review total", abs(after_rev - before_rev) < 0.01,
+      (before_rev, after_rev))
+client.delete(f"/transactions/{lend['id']}", headers=AUTH)
+
+# Period windows must not overlap — an overlap would double-count a spend in
+# both "this week" and "last week".
+from timeutil import period_range_utc
+for p_ in ("day", "week", "month"):
+    cur_s, cur_e = period_range_utc(p_, 0)
+    prv_s, prv_e = period_range_utc(p_, 1)
+    check(f"{p_}: previous window ends exactly where current begins", prv_e == cur_s, (prv_e, cur_s))
+    check(f"{p_}: current window is non-empty", cur_e > cur_s, (cur_s, cur_e))
+
 # --- to-dos ---------------------------------------------------------------------
 t1 = client.post("/todos", json={"text": "Pay credit card bill"}, headers=AUTH).json()
 t2 = client.post("/todos", json={"text": "Renew bike insurance"}, headers=AUTH).json()

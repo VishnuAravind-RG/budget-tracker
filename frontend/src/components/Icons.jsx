@@ -29,6 +29,10 @@ export const TargetIcon = (p) => (
   <svg {...base} {...p}><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="4" /><circle cx="12" cy="12" r="0.6" fill="currentColor" /></svg>
 )
 
+export const ChartIcon = (p) => (
+  <svg {...base} {...p}><path d="M4 19V5" /><path d="M4 19h16" /><rect x="7.5" y="12" width="3" height="5" rx="0.7" /><rect x="12.5" y="8" width="3" height="9" rx="0.7" /><rect x="17.5" y="10.5" width="3" height="6.5" rx="0.7" /></svg>
+)
+
 export const TrashIcon = (p) => (
   <svg {...base} width="18" height="18" {...p}><path d="M4 7h16" /><path d="M9.5 7V4.8h5V7" /><path d="M6.5 7l.8 12.2h9.4L17.5 7" /></svg>
 )

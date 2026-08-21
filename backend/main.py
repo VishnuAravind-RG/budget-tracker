@@ -49,6 +49,8 @@ from schemas import (  # noqa: E402
 )
 from timeutil import (  # noqa: E402
     days_in_month,
+    period_label,
+    period_range_utc,
     local_date_to_utc,
     local_day_key,
     local_now,
@@ -512,6 +514,85 @@ async def scan_statement_endpoint(
         )
 
     return {"transactions": rows}
+
+
+@api.get("/stats/summary")
+def stats_summary(
+    period: str = Query(default="month", pattern="^(day|week|month)$"),
+    db: Session = Depends(get_db),
+):
+    """Day / week / month review: what was spent, how that compares with the
+    period before, where it went, and who to.
+
+    Every figure filters on `kind == "expense"`, never on direction — money
+    lent to a friend or loaded onto a wallet is a debit but not spending, and
+    a review screen that conflated them would be lying about the number people
+    look at most (see the money-movement kinds note in CLAUDE.md).
+    """
+    def spend_between(start, end):
+        rows = (
+            db.query(Transaction)
+            .filter(
+                Transaction.kind == "expense",
+                Transaction.created_at >= start,
+                Transaction.created_at < end,
+            )
+            .all()
+        )
+        return rows
+
+    start, end = period_range_utc(period, 0)
+    prev_start, prev_end = period_range_utc(period, 1)
+
+    current = spend_between(start, end)
+    previous = spend_between(prev_start, prev_end)
+
+    total = round(sum(t.amount for t in current), 2)
+    prev_total = round(sum(t.amount for t in previous), 2)
+
+    # No percentage when there's nothing to compare against: "+100%" against a
+    # zero baseline reads as a real trend when it only means "last time was 0".
+    delta_pct = round((total - prev_total) / prev_total * 100, 1) if prev_total > 0 else None
+
+    by_category: dict[str, float] = {}
+    by_merchant: dict[str, dict] = {}
+    for t in current:
+        by_category[t.category] = by_category.get(t.category, 0) + t.amount
+        name = (t.merchant or "Unknown").strip() or "Unknown"
+        entry = by_merchant.setdefault(name, {"merchant": name, "spent": 0.0, "count": 0})
+        entry["spent"] += t.amount
+        entry["count"] += 1
+
+    income = (
+        db.query(func.coalesce(func.sum(Transaction.amount), 0.0))
+        .filter(
+            Transaction.kind == "income",
+            Transaction.created_at >= start,
+            Transaction.created_at < end,
+        )
+        .scalar()
+    )
+
+    return {
+        "period": period,
+        "label": period_label(period, 0),
+        "previous_label": period_label(period, 1),
+        "start": start.isoformat() + "Z",
+        "end": end.isoformat() + "Z",
+        "total_spent": total,
+        "previous_spent": prev_total,
+        "delta_pct": delta_pct,
+        "total_income": round(float(income or 0), 2),
+        "transaction_count": len(current),
+        "categories": sorted(
+            ({"category": c, "spent": round(v, 2)} for c, v in by_category.items()),
+            key=lambda x: -x["spent"],
+        ),
+        "merchants": sorted(
+            ({**m, "spent": round(m["spent"], 2)} for m in by_merchant.values()),
+            key=lambda x: -x["spent"],
+        )[:8],
+    }
 
 
 @api.get("/transactions", response_model=list[TransactionOut])

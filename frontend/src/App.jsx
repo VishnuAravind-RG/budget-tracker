@@ -13,15 +13,17 @@ import Review from './components/Review.jsx'
 import Transactions from './components/Transactions.jsx'
 import Fuel from './components/Fuel.jsx'
 import Todos from './components/Todos.jsx'
+import Summary from './components/Summary.jsx'
 import LendingCard from './components/LendingCard.jsx'
 import RecurringCard from './components/RecurringCard.jsx'
-import { FuelIcon, HomeIcon, ListIcon, PlusIcon, ReviewIcon, TargetIcon, TodoIcon } from './components/Icons.jsx'
+import { ChartIcon, FuelIcon, HomeIcon, ListIcon, PlusIcon, ReviewIcon, TargetIcon, TodoIcon } from './components/Icons.jsx'
 
 const TABS = [
   { id: 'home', label: 'Home', Icon: HomeIcon },
   { id: 'review', label: 'Review', Icon: ReviewIcon },
   { id: 'add', label: 'Add', Icon: PlusIcon },
   { id: 'history', label: 'History', Icon: ListIcon },
+  { id: 'summary', label: 'Summary', Icon: ChartIcon },
   { id: 'fuel', label: 'Fuel', Icon: FuelIcon },
   { id: 'todos', label: 'To-do', Icon: TodoIcon },
   { id: 'budgets', label: 'Budgets', Icon: TargetIcon },
@@ -326,6 +328,8 @@ export default function App() {
             onDelete={removeTransaction}
           />
         )}
+
+        {tab === 'summary' && <Summary />}
 
         {tab === 'fuel' && <Fuel />}
 

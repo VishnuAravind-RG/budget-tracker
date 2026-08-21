@@ -117,6 +117,8 @@ export const api = {
     form.append('image', file)
     return request('/ai/scan-statement', { method: 'POST', body: form })
   },
+  // Day/week/month review, each with the comparison against the period before.
+  statsSummary: (period) => request(`/stats/summary${qs({ period })}`),
   summary: (month, year) => request(`/budget/summary${qs({ month, year })}`),
   trend: (month, year) => request(`/stats/daily${qs({ month, year })}`),
   budgetLimits: () => request('/budget/limits'),

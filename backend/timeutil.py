@@ -56,6 +56,68 @@ def local_date_to_utc(year: int, month: int, day: int) -> datetime:
     return local_noon.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def period_range_utc(period: str, offset: int = 0) -> tuple[datetime, datetime]:
+    """Naive-UTC [start, end) for a local day / week / month, `offset` periods
+    back from the current one (0 = current, 1 = the one before).
+
+    All boundaries are computed in LOCAL time and only then converted, which
+    is the whole point: a spend at 1am local belongs to that local day, not to
+    the previous one that UTC would put it in. Weeks start Monday.
+    """
+    now = datetime.now(LOCAL_TZ)
+
+    if period == "day":
+        start_local = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=offset)
+        end_local = start_local + timedelta(days=1)
+    elif period == "week":
+        monday = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now.weekday())
+        start_local = monday - timedelta(weeks=offset)
+        end_local = start_local + timedelta(weeks=1)
+    elif period == "month":
+        month = now.month - offset
+        year = now.year
+        while month < 1:
+            month += 12
+            year -= 1
+        start_local = datetime(year, month, 1, tzinfo=LOCAL_TZ)
+        end_local = (
+            datetime(year + 1, 1, 1, tzinfo=LOCAL_TZ) if month == 12
+            else datetime(year, month + 1, 1, tzinfo=LOCAL_TZ)
+        )
+    else:
+        raise ValueError("period must be day, week or month")
+
+    to_utc = lambda dt: dt.astimezone(timezone.utc).replace(tzinfo=None)  # noqa: E731
+    return to_utc(start_local), to_utc(end_local)
+
+
+def period_label(period: str, offset: int = 0) -> str:
+    """Human label for the window `period_range_utc` returns."""
+    now = datetime.now(LOCAL_TZ)
+    if period == "day":
+        if offset == 0:
+            return "Today"
+        if offset == 1:
+            return "Yesterday"
+        return (now - timedelta(days=offset)).strftime("%-d %b" if os.name != "nt" else "%d %b")
+    if period == "week":
+        if offset == 0:
+            return "This week"
+        if offset == 1:
+            return "Last week"
+        return f"{offset} weeks ago"
+    if offset == 0:
+        return "This month"
+    if offset == 1:
+        return "Last month"
+    month = now.month - offset
+    year = now.year
+    while month < 1:
+        month += 12
+        year -= 1
+    return datetime(year, month, 1).strftime("%B %Y")
+
+
 def days_in_month(year: int, month: int) -> int:
     first = datetime(year, month, 1)
     nxt = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
