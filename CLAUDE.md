@@ -273,6 +273,47 @@ The explicit requirement was free-forever, no card, anywhere.
   explains nothing), and `POST /lending/{person}/repaid` for cash repayments
   — previously untrackable, so a settled debt nagged forever.
 
+### Bug-hunt pass — what a systematic audit turned up
+
+Ordered by how much money each could quietly get wrong. All fixed, each
+with a test written to fail first.
+
+1. **A race booked one payment six times.** Six simultaneous copies of one
+   alert all passed the "does this reference exist?" check before any
+   committed: Rs 1,998 counted instead of Rs 333. MacroDroid genuinely
+   retries on flaky mobile data, so this was reachable in normal use. An
+   application-level check-then-insert cannot hold under concurrency — the
+   guarantee now lives in the schema as a UNIQUE index on `bank_ref`, with
+   `_ingest` catching the violation and returning the winning row. Verified
+   at 8, 12 and 20 concurrent requests: one row every time.
+2. **A remembered "paying back what I owe" payee was counted as spending.**
+   `_ingest`'s remembered-payee branch hand-rolled its own copy of the kind
+   mapping and drifted — `friend_settle` matched no case and fell through to
+   a plain expense. Four live payees were stored that way. **This is the
+   second time that branch has drifted** (the first was "merchant" vs
+   "expense"), so it now calls `_resolve_kind` like every other caller.
+3. **Self-transfers were counted as income.** A real Rs 10,000 credit was
+   money moved in from the owner's own SBI account; the alert says so
+   ("Sender: ... (VPA: rgvishnuaravind@oksbi)") but nothing read that line.
+   Credits now yield a sender and are asked about once — scoped to credits
+   carrying a real UPI id, so salary credits stay out of the queue.
+4. **`bank_ref` was added nullable with no backfill**, so every pre-existing
+   row had NULL and reference dedupe protected none of them. That is how the
+   Rs 10,000 credit got stored twice in the first place.
+5. **One month's total appeared under another month's header.** The snapshot
+   effect merged with what was on screen, so a month with no snapshot kept
+   the previous month's figures until the fetch landed.
+6. **No cap on hand-entered amounts** — fuzzing accepted a fifteen-digit
+   figure, and a fat-fingered extra zero would wreck every total it touches.
+
+Clean on the first pass, worth not re-testing blindly: all 175 rows satisfy
+kind/direction/category consistency; every total reconciles across
+`/budget/summary`, `/stats/summary`, `/stats/daily` and the raw rows; 28 of
+29 hostile inputs were correctly rejected (the 29th is Cloudflare's WAF, not
+the app); timezone boundaries put a 23:59 IST spend in the right month;
+auth drops a revoked token and clears the cache with it; and the app still
+renders from cache with the network cut while refusing to fake a write.
+
 ## Verification before this was pushed
 
 Both `smoke_test.py` (96 checks) and `test_migration.py` (17 checks) passed
@@ -292,7 +333,7 @@ changes), then fetched the live bundle from Vercel and confirmed its byte
 size matched the local build exactly, plus grepped for new-feature strings
 (`"Log a fill-up"`, `"Money lent out"`) to confirm it wasn't a stale cache.
 
-**As of 2026-08-21 (end of session):** `smoke_test.py` is at **174 checks**, still passing.
+**As of 2026-08-21 (end of session):** `smoke_test.py` is at **226 checks**, still passing.
 There is also a browser suite (22 checks, Playwright, driven against real
 production) covering every tab rendering *real content* rather than a
 spinner, the Review and Add lend-vs-settle questions, the fuel trip/odo
