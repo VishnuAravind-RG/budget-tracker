@@ -215,6 +215,10 @@ class TransactionOut(BaseModel):
     counterparty: Optional[str] = None
     note: Optional[str] = None
     bank_ref: Optional[str] = None
+    import_batch: Optional[str] = None
+    # Only ever populated on the review queue, where the answer is still
+    # being asked for. Computed, never stored — see categorizer.business_hint().
+    business_hint: Optional[str] = None
 
     @field_serializer("created_at")
     def _utc(self, dt: datetime) -> str:
@@ -344,10 +348,88 @@ class PayeeOut(BaseModel):
     kind: str
     default_category: Optional[str]
     created_at: datetime
+    # Why this looks like a business, when it does — computed, not stored.
+    # Surfaced against answers of "a person", which is where getting it wrong
+    # is expensive: a shop remembered as a friend files every future payment
+    # there as money lent out instead of spending, and is never asked about
+    # again. See categorizer.business_hint().
+    business_hint: Optional[str] = None
+    # How many transactions this answer has already decided.
+    used_by: int = 0
 
     @field_serializer("created_at")
     def _utc(self, dt: datetime) -> str:
         return dt.isoformat() + "Z"
+
+
+class PayeeUpdate(BaseModel):
+    """Correct a remembered answer that was wrong.
+
+    Forgetting a payee (DELETE) only stops it being applied in future — it
+    leaves the rows it already mis-filed alone, and there was no way at all
+    to say "that was actually a shop". `apply_to_past` re-resolves every
+    transaction the answer decided, which is the only way a bakery wrongly
+    remembered as a friend stops appearing in the who-owes-you list.
+    """
+
+    kind: str
+    label: Optional[str] = Field(default=None, max_length=80)
+    category: Optional[str] = None
+    apply_to_past: bool = False
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        if v not in ("expense", "friend", "friend_settle", "wallet", "self"):
+            raise ValueError("kind must be one of: expense, friend, friend_settle, wallet, self")
+        return v
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_category(v) if v is not None else v
+
+
+class ScannedRow(BaseModel):
+    """One row confirmed off a screenshot of a transaction list."""
+
+    amount: float = Field(gt=0, le=MAX_MANUAL_AMOUNT)
+    direction: str = "debit"
+    category: Optional[str] = None
+    merchant: Optional[str] = Field(default=None, max_length=60)
+    kind: str = "expense"
+    occurred_on: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("direction")
+    @classmethod
+    def _direction(cls, v: str) -> str:
+        if v not in ("debit", "credit"):
+            raise ValueError("direction must be 'debit' or 'credit'")
+        return v
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, v: str) -> str:
+        if v not in ("expense", "friend", "friend_settle", "wallet", "self"):
+            raise ValueError("kind must be one of: expense, friend, friend_settle, wallet, self")
+        return v
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_category(v) if v is not None else v
+
+
+class ScreenshotImport(BaseModel):
+    """A whole screenshot's worth of confirmed rows, written as one batch.
+
+    One request rather than one per row: the previous client looped over
+    addManual(), so a six-row screenshot was six round trips to a
+    single-worker free-tier backend, and a failure halfway left half a
+    screenshot imported with no record of which half.
+    """
+
+    rows: list[ScannedRow] = Field(min_length=1, max_length=100)
 
 
 class LendingBalance(BaseModel):

@@ -1,33 +1,18 @@
 import { useEffect, useState } from 'react'
 
-import { api } from '../api.js'
 import { money } from '../format.js'
-import { TrashIcon } from './Icons.jsx'
+import RememberedPayees from './RememberedPayees.jsx'
 
-const PAYEE_KIND_LABEL = {
-  expense: 'Shop',
-  friend: 'Person (lending)',
-  friend_settle: 'Person (settling a debt)',
-  wallet: 'Wallet',
-  self: 'My account',
-}
-
-export default function Budgets({ categories, limits, spentByCategory, onSave, onSignOut }) {
+export default function Budgets({ categories, limits, spentByCategory, onSave, onRefresh, onSignOut }) {
   const [draft, setDraft] = useState({})
   const [busy, setBusy] = useState(false)
   const [saved, setSaved] = useState(false)
-  const [payees, setPayees] = useState(null)
-  const [forgetting, setForgetting] = useState('')
 
   useEffect(() => {
     const next = {}
     limits.forEach((b) => { next[b.category] = String(b.monthly_limit) })
     setDraft(next)
   }, [limits])
-
-  useEffect(() => {
-    api.payees().then(setPayees).catch(() => setPayees([]))
-  }, [])
 
   const total = Object.values(draft).reduce((sum, v) => sum + (Number.parseFloat(v) || 0), 0)
 
@@ -91,52 +76,7 @@ export default function Budgets({ categories, limits, spentByCategory, onSave, o
         </button>
       </section>
 
-      <section className="card">
-        <div className="card-head">
-          <h2 className="card-title">Remembered</h2>
-          <span className="card-sub">{payees ? `${payees.length} answered` : 'loading…'}</span>
-        </div>
-        <p style={{ margin: '0 0 14px', fontSize: 13, color: 'var(--text-2)' }}>
-          Every "who is this?" answer, saved for good — a shop, person, wallet, or your own
-          account never gets asked about twice once it's here.
-        </p>
-
-        {payees === null && <div className="empty">Loading…</div>}
-        {payees && payees.length === 0 && <div className="empty">Nothing remembered yet.</div>}
-        {payees && payees.length > 0 && (
-          <div className="rows">
-            {payees.map((p) => (
-              <div className="row" key={p.key}>
-                <div className="row-main">
-                  <div className="row-title">{p.label}</div>
-                  <div className="row-meta">
-                    {PAYEE_KIND_LABEL[p.kind] || p.kind}
-                    {p.default_category ? ` · ${p.default_category}` : ''}
-                  </div>
-                </div>
-                <button
-                  className="icon-btn"
-                  aria-label={`Forget ${p.label}`}
-                  title="Forget this — the next payment from them will ask again"
-                  disabled={forgetting === p.key}
-                  onClick={async () => {
-                    if (!confirm(`Forget "${p.label}"?\n\nThe next transaction from them will ask who they are again. Existing transactions aren't changed.`)) return
-                    setForgetting(p.key)
-                    try {
-                      await api.forgetPayee(p.key)
-                      setPayees((cur) => cur.filter((x) => x.key !== p.key))
-                    } finally {
-                      setForgetting('')
-                    }
-                  }}
-                >
-                  <TrashIcon />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+      <RememberedPayees categories={categories} onChanged={onRefresh} />
 
       {onSignOut && (
         <div style={{ marginTop: 8, paddingTop: 16, textAlign: 'center' }}>

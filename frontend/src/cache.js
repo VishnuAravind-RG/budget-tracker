@@ -16,8 +16,11 @@
 
 const KEY = 'bt_cache_v1'
 // Bump when the cached shape changes so old entries are discarded, not
-// half-read into a newer UI that expects different fields.
-const SHAPE = 1
+// half-read into a newer UI that expects different fields. Bumped to 2 when
+// recurring detection moved server-side: the cached items look similar but
+// carry different fields, and a v1 entry rendered by the new card would show
+// a payment as neither paid nor due.
+const SHAPE = 2
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
 const slot = (month, year) => `${year}-${month}`

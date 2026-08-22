@@ -45,6 +45,10 @@ _NEW_COLUMNS_BY_TABLE = {
         # date-aware, the two were the same value anyway.
         ("ingested_at", "TIMESTAMP", "created_at"),
         ("bank_ref", "VARCHAR", None),
+        # Groups the rows written by one screenshot import, so the whole
+        # upload can be undone as a unit. No backfill: rows written before
+        # this existed genuinely belong to no batch.
+        ("import_batch", "VARCHAR", None),
     ],
     # trip_km: distance since the previous fill, straight off a trip meter
     # that gets reset at every fill. No backfill — an existing row genuinely

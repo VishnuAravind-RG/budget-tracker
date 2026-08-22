@@ -314,6 +314,143 @@ the app); timezone boundaries put a 23:59 IST spend in the right month;
 auth drops a revoked token and clears the cache with it; and the app still
 renders from cache with the network cut while refusing to fake a write.
 
+## Added in the 2026-08-22 session (six enhancements)
+
+Six things the owner asked for in one go, after asking what was worth doing
+next. Each one came out of something visible in their real data.
+
+### 1. Capture-quiet alarm — `/stats/capture-health` + `CaptureWarning.jsx`
+
+**The failure this exists for:** MacroDroid stopped forwarding SMS for two
+days and *nothing looked wrong anywhere*. Totals simply grew more slowly. The
+gap is still visible in the history (7 Aug 2026 has zero transactions in a
+month where every other day has several) and it was only noticed by accident,
+days later.
+
+Warns when nothing has arrived automatically for `CAPTURE_QUIET_HOURS`
+(default 36, env-tunable). Measured on `ingested_at`, never `created_at` —
+back-dated alerts make created_at useless here, since an email arriving today
+about last Tuesday would read as five days of silence.
+
+Two details that matter:
+- **`manual_since`** counts transactions typed in by hand since the last
+  automatic one. That is the tell separating "quiet because you haven't spent
+  anything" from "quiet because the pipe is dead".
+- **A channel that has never delivered is not reported as broken.** Gmail
+  polling was connected long after SMS forwarding; calling a pipe that was
+  never plugged in "quiet" is noise, not a warning.
+
+`_ingest()` now records *which* channel delivered (`source` is `"sms"` or
+`"gmail"`), so the warning can name what to go and check.
+
+### 2. Remembered answers became correctable — `PATCH /payees/{key}`
+
+**The bug in live data:** RADDLINS FOOD, a bakery, was answered as "a person".
+Its payments were filed as money lent out, and it sat in the who-owes-you list
+beside actual friends. A remembered payee is never asked about again, so
+nothing would ever have surfaced it.
+
+`DELETE /payees` existed but only stops an answer being applied *in future* —
+it leaves everything it already mis-filed alone. The new PATCH changes the
+answer and, with `apply_to_past`, re-runs every transaction it decided back
+through `_resolve_kind()` (the same function that classified them, so the two
+cannot disagree about what "friend" means). Off by default: it moves
+historical totals, which should be a choice.
+
+`categorizer.business_hint()` returns *why* a counterparty looks like a
+business — "a Vyapar shop-billing UPI id", "'agencies' is a trading-name
+word" — rather than a bare boolean, so it can be checked against what the
+owner actually knows. Shown in Review before "a person" is saved, and against
+existing answers in the Remembered list. Verified against every real payee in
+production: catches the shops, flags none of the real friends. **Getting this
+backwards would be worse than not having it** — auto-filing a real friend as
+a shop would silently destroy lending tracking — so it only ever asks.
+
+### 3. Screenshot imports are batched and undoable
+
+Rows used to be POSTed one at a time through `/transactions/manual`, which
+meant `source="manual"`: indistinguishable afterwards from things typed by
+hand, no way to see what an upload brought in, no way to take one back. And a
+six-row screenshot was six round trips to a single-worker backend, so a
+failure halfway left half a screenshot imported with no record of which half.
+
+Now `POST /transactions/screenshot-import` writes the lot in one commit with
+`source="screenshot"` and a shared `import_batch` id; `GET /imports` lists
+them and `DELETE /imports/{batch}` undoes one, touching only its own rows.
+The Add tab no longer jumps to Home after an import — the Undo button would
+have gone with it.
+
+The endpoint also refuses to book a `Transfer`-categorised row as an expense
+even if the client asks it to. The client already had that bug once and
+booked a GPay "Self transfer" as ₹10,000 of spending.
+
+### 4. Credit alerts that name a sender — and ones that don't
+
+Three real credits totalling ₹11,912 (one of them ₹10,000) were stored as
+merchant `Unknown`. HDFC's email template puts the sender in a lettered field
+(`a. Date: … b. Sender: …`) and the pattern required a parenthesised VPA
+beside the name, which those messages don't carry.
+
+- `CREDIT_SENDER_NAME_RE` reads a sender named without a VPA. Credits only —
+  `From:` in a debit alert means the account the money *left*, and reading
+  that as a counterparty is the bug that once booked a card swipe against the
+  owner's own bank.
+- When nothing names the sender, the row now reads **"Credit to HDFC …9393"**
+  instead of "Unknown", and is queued for review. `Unknown` reads as a parse
+  failure and hides the real situation: the alert genuinely never said.
+- Critically, an unnamed credit gets **no `payee_key`**. Keying off that
+  placeholder would fold every anonymous credit from anyone into one
+  remembered "payee" that is never asked about again.
+
+### 5. Recurring detection now says whether it has happened — `/stats/recurring`
+
+Detection already existed but only described the past. "You pay this every
+month" is a fact, not a prompt. Each repeat is now `paid` / `due` / `overdue`
+for the current month, with the day it usually lands and the amount it usually
+is — both **medians**, so one unusually large grocery run doesn't drag the
+expectation up and one early payment doesn't drag the date to the 1st.
+
+Moved server-side in the process. The client version derived it from an extra
+unfiltered fetch of the last 200 transactions — an arbitrary window that
+silently truncated the history the detection depends on, and a second full
+transaction list down the wire on every refresh. `frontend/src/recurring.js`
+is gone; the cache SHAPE was bumped to 2 so v1 entries are discarded rather
+than half-read.
+
+Spreadsheet-imported rows (`source="import"`) count as evidence a month
+happened, but their *day* is excluded — they're anchored to the 1st, and
+counting that would drag every expected date towards the start of the month.
+
+### 6. Nightly encrypted backup — `/export/all` + `.github/workflows/backup.yml`
+
+Everything lived in one free-tier Supabase project with no backup and no
+export route, and rows have been deleted by hand more than once while
+correcting double-counted months.
+
+**The encryption is not optional and must not be "simplified" away.** This
+repository is public, and workflow artifacts on a public repo can be
+downloaded by anyone who can see the run. An unencrypted artifact would
+publish the complete transaction history. The passphrase is checked *before*
+the export runs, so a missing secret can never leave plaintext on the runner;
+the plaintext is deleted after encryption; the upload names one file rather
+than a glob. A run with no `BACKUP_PASSPHRASE` fails, it does not fall back.
+
+The export deliberately **excludes the `gmail_auth` table**: it holds a Google
+OAuth refresh token, which is a live credential, not data. Re-connecting Gmail
+after a restore is one visit to `/gmail/auth/start`; leaking a token that
+never expires is not undoable.
+
+Needs two repository secrets — `APP_AUTH_TOKEN` and `BACKUP_PASSPHRASE`. Keep
+a copy of the passphrase somewhere other than GitHub: a backup you cannot
+decrypt is not a backup.
+
+### Also fixed while in there
+
+`smoke_test.py` printed its pass/fail summary **in the middle of the file**.
+Every check written after that point printed PASS/FAIL but could not affect
+the exit code — a failing one would have exited 0 under "All checks passed".
+The report is now last, and says how many checks it counted.
+
 ## Verification before this was pushed
 
 Both `smoke_test.py` (96 checks) and `test_migration.py` (17 checks) passed
@@ -333,7 +470,7 @@ changes), then fetched the live bundle from Vercel and confirmed its byte
 size matched the local build exactly, plus grepped for new-feature strings
 (`"Log a fill-up"`, `"Money lent out"`) to confirm it wasn't a stale cache.
 
-**As of 2026-08-21 (end of session):** `smoke_test.py` is at **226 checks**, still passing.
+**As of 2026-08-22 (end of session):** `smoke_test.py` is at **300 checks**, `test_migration.py` at 22, both passing.
 There is also a browser suite (22 checks, Playwright, driven against real
 production) covering every tab rendering *real content* rather than a
 spinner, the Review and Add lend-vs-settle questions, the fuel trip/odo

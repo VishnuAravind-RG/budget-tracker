@@ -1,0 +1,90 @@
+name: Nightly encrypted backup
+
+# Everything this app knows lives in one free-tier Supabase project with no
+# backup of any kind, and rows have been deleted by hand more than once while
+# correcting double-counted months. A snapshot a day is cheap insurance.
+#
+# WHY THE ENCRYPTION IS NOT OPTIONAL: this repository is public, and workflow
+# artifacts on a public repository can be downloaded by anyone who can see the
+# run. An unencrypted artifact here would publish a complete transaction
+# history — every amount, merchant, and person lent to. So the plaintext never
+# leaves the runner: it is encrypted in place and only the ciphertext is
+# uploaded. If the passphrase secret is missing the run FAILS rather than
+# falling back to uploading anything readable.
+#
+# One-time setup — add two repository secrets under
+# Settings -> Secrets and variables -> Actions:
+#   APP_AUTH_TOKEN     the same bearer token the app signs in with
+#   BACKUP_PASSPHRASE  any long random string; KEEP IT SOMEWHERE ELSE, because
+#                      a backup you cannot decrypt is not a backup
+#
+# To restore, download the artifact and:
+#   openssl enc -d -aes-256-cbc -pbkdf2 -in backup.json.enc -out backup.json
+# then feed backup.json back through the API (or straight into Postgres).
+
+on:
+  schedule:
+    # 20:30 UTC = 02:00 IST — after the day's spending is done, before the
+    # next one starts, so a snapshot covers whole local days.
+    - cron: "30 20 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and encrypt the database
+        env:
+          APP_AUTH_TOKEN: ${{ secrets.APP_AUTH_TOKEN }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$APP_AUTH_TOKEN" ]; then
+            echo "::error::APP_AUTH_TOKEN repository secret is not set — cannot authenticate."
+            exit 1
+          fi
+          # Checked BEFORE the export runs, so a missing passphrase can never
+          # leave plaintext sitting on the runner waiting to be uploaded.
+          if [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::error::BACKUP_PASSPHRASE repository secret is not set."
+            echo "This repository is public: an unencrypted artifact would publish the whole transaction history."
+            echo "Add a long random string as BACKUP_PASSPHRASE and keep a copy somewhere safe."
+            exit 1
+          fi
+
+          code=$(curl -s -o backup.json -w "%{http_code}" --max-time 180 \
+            https://budget-tracker-api-jkub.onrender.com/export/all \
+            -H "Authorization: Bearer $APP_AUTH_TOKEN")
+          if [ "$code" != "200" ]; then
+            echo "::error::Export returned $code — nothing was backed up tonight."
+            head -c 400 backup.json || true
+            exit 1
+          fi
+
+          # A backup that is valid JSON but empty is worse than no backup: it
+          # looks like a successful run while quietly recording nothing, and
+          # would be the file someone reaches for after losing the real data.
+          rows=$(python3 -c "import json;d=json.load(open('backup.json'));print(d['counts']['transactions'])")
+          echo "Exported $rows transactions."
+          if [ "$rows" -lt 1 ]; then
+            echo "::error::Export contained no transactions — refusing to store an empty backup."
+            exit 1
+          fi
+
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -in backup.json -out backup.json.enc -pass env:BACKUP_PASSPHRASE
+          # The plaintext has served its purpose. Removing it here means a
+          # later step or a change to the upload glob cannot pick it up.
+          rm -f backup.json
+          ls -l backup.json.enc
+
+      - name: Upload the encrypted snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: budget-backup-${{ github.run_id }}
+          # Only the .enc file, and only because it exists — never a wildcard
+          # that could sweep up a plaintext export if one is ever reintroduced.
+          path: backup.json.enc
+          retention-days: 90
+          if-no-files-found: error

@@ -48,6 +48,13 @@ class Transaction(Base):
     # The bank's own transaction reference. Indexed because every ingest looks
     # it up to reject a payment already recorded through another channel.
     bank_ref = Column(String, nullable=True, index=True)
+    # Which screenshot import wrote this row, when one did. A screenshot is
+    # read by a vision model and confirmed in bulk, so a bad batch is a bad
+    # batch — one wrong date read, or one row misjudged as new, and the fix
+    # wanted is "undo that upload", not deleting eight rows by hand. Grouping
+    # them under one id is what makes that possible. NULL for everything
+    # entered any other way.
+    import_batch = Column(String, nullable=True, index=True)
 
     __table_args__ = (
         Index("ix_transactions_created_at", "created_at"),

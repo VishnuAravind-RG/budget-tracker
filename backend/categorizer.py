@@ -132,7 +132,36 @@ ANY_VPA_RE = re.compile(r"\b([\w.\-]+@[\w.\-]+)")
 # Capturing the sender means that can be answered once ("my account") and
 # remembered, exactly like any other payee.
 CREDIT_SENDER_RE = re.compile(
-    r"Sender:\s*([^()\n]{2,60}?)\s*\(\s*VPA:?\s*([\w.\-]+@[\w.\-]+)\s*\)",
+    r"(?:Sender|Remitter|Received from|Credited by|From)\s*:?\s*"
+    r"([^()\n]{2,60}?)\s*\(\s*VPA:?\s*([\w.\-]+@[\w.\-]+)\s*\)",
+    re.IGNORECASE,
+)
+
+# The same sender line without the parenthesised VPA. HDFC's own email
+# template numbers its fields ("a. Date: ... b. Sender: ... c. Amount: ..."),
+# and the VPA is not always among them — three real credits totalling
+# Rs 11,912, one of them Rs 10,000, were stored as merchant "Unknown" because
+# a sender with no VPA beside it matched nothing at all. A name alone is
+# still worth having: it is the difference between "someone sent you 10,000"
+# and a blank.
+#
+# The trailing lookahead stops the capture running into the next lettered
+# field of that template ("... b. Sender: ARJUN K c. Amount: ...").
+CREDIT_SENDER_NAME_RE = re.compile(
+    r"(?:Sender|Remitter|Received from|Credited by)\s*(?:Name)?\s*:\s*"
+    r"([A-Za-z][A-Za-z0-9&'.\- ]{1,58}?)"
+    r"(?=\s+[a-z]\.\s|\s*[(,;\n]|\.\s|$|\s+(?:on|ref|upi|txn|vpa|a/c|account|amount|dated)\b)",
+    re.IGNORECASE,
+)
+
+# Which of the account holder's OWN accounts the money landed in. Not a
+# counterparty, but the only identifying detail some credit alerts carry at
+# all — and "Credit to HDFC ...9393" is a far more honest label for a row
+# than "Unknown", which reads like a parse failure and hides the real
+# situation: the alert genuinely never said who sent it.
+CREDIT_ACCOUNT_TAIL_RE = re.compile(
+    r"credited to your\s+([A-Za-z][A-Za-z ]{1,20}?)\s*(?:Bank\s*)?account\s*"
+    r"(?:ending in|ending|no\.?|number|x+)?\s*(\d{3,6})",
     re.IGNORECASE,
 )
 
@@ -233,6 +262,14 @@ def parse_sms(text: str) -> dict:
     if sender:
         merchant = _clean_merchant(sender.group(1))
         upi_id = sender.group(2).lower()
+    elif direction == "credit":
+        # Sender named, but with no VPA beside it. Only attempted on a
+        # credit: "From:" appears in plenty of debit alerts meaning the
+        # account the money LEFT, and reading that as a counterparty is the
+        # bug that once booked a card swipe against the sender's own bank.
+        named_only = CREDIT_SENDER_NAME_RE.search(text)
+        if named_only:
+            merchant = _clean_merchant(named_only.group(1))
 
     # HDFC's "account credited" template with no sender line names no
     # counterparty at all, and the generic patterns below would grab
@@ -259,6 +296,21 @@ def parse_sms(text: str) -> dict:
                 if merchant:
                     break
 
+    # Whether the alert actually identified the other party, decided BEFORE
+    # the account-tail fallback below fills in a placeholder. _ingest() uses
+    # this to ask "who sent this?" rather than filing an anonymous credit as
+    # income forever — which is what happened to a real Rs 10,000.
+    has_counterparty = bool(merchant)
+
+    # Nothing named the sender. Rather than "Unknown" — which reads as a
+    # parse failure and tells you nothing — say which of your own accounts
+    # it landed in, when the alert says that much.
+    if not merchant and direction == "credit":
+        tail = CREDIT_ACCOUNT_TAIL_RE.search(text)
+        if tail:
+            bank = re.sub(r"\s+", " ", tail.group(1)).strip()
+            merchant = f"Credit to {bank} ...{tail.group(2)}"[:60]
+
     is_transaction = (
         amount > 0
         and (is_debit or is_credit)
@@ -270,6 +322,7 @@ def parse_sms(text: str) -> dict:
         "direction": direction,
         "merchant": merchant or "Unknown",
         "upi_id": upi_id,
+        "has_counterparty": has_counterparty,
         "is_transaction": is_transaction,
     }
 
@@ -357,6 +410,77 @@ def payee_key_for(merchant: str) -> str | None:
         return merchant.lower()
     normalized = re.sub(r"\s+", " ", merchant).strip().lower()
     return f"name:{normalized}" if len(normalized) >= 2 else None
+
+
+# Shapes that mean "this is a business", used to question a "that's a person"
+# answer before it gets remembered forever.
+#
+# This exists because of a real mistake in live data: RADDLINS FOOD, a
+# bakery, was answered as "a person" and filed under Lending, where it sat in
+# the who-owes-you list alongside actual friends. Once remembered, every
+# future payment there would have been booked as money lent out rather than
+# food — and the answer is never asked again, so nothing would have surfaced
+# it.
+#
+# A hint, never a decision. Getting this backwards (auto-filing a real friend
+# as a shop) would silently destroy lending tracking, so the heuristic only
+# ever produces a question for the user to answer.
+_MERCHANT_VPA_PATTERNS = [
+    # Vyapar, Paytm, PhonePe, BharatPe, Razorpay and Google Pay all issue
+    # merchant-side UPI ids with recognisable shapes. A person's handle never
+    # looks like any of these.
+    (re.compile(r"^vyapar\.", re.I), "a Vyapar shop-billing UPI id"),
+    (re.compile(r"^(?:paytmqr|paytm-)", re.I), "a Paytm merchant QR id"),
+    (re.compile(r"^bharatpe", re.I), "a BharatPe merchant id"),
+    (re.compile(r"^q\d{6,}$", re.I), "a PhonePe merchant QR id"),
+    (re.compile(r"^\d{6,}$"), "an all-numeric merchant id"),
+    (re.compile(r"^(?:rzp|razorpay)", re.I), "a Razorpay merchant id"),
+    (re.compile(r"merchant|mrchnt", re.I), "a merchant-flagged UPI id"),
+]
+_MERCHANT_VPA_DOMAINS = {
+    "ptys": "a Paytm merchant handle",
+    "okbizaxis": "a Google Pay for Business handle",
+    "pz": "a PayZapp merchant handle",
+}
+
+# Words that only ever appear in a trading name. Deliberately excludes
+# ambiguous ones — "kumar traders" is a shop but "kumar" alone is a person,
+# and plenty of Indian personal names would collide with a looser list.
+_BUSINESS_WORDS = {
+    "store", "stores", "mart", "supermarket", "market", "bakery", "bakers",
+    "hotel", "restaurant", "cafe", "canteen", "foods", "food", "sweets",
+    "agencies", "agency", "traders", "trading", "enterprises", "enterprise",
+    "medicals", "medical", "pharmacy", "pharma", "clinic", "hospital",
+    "motors", "automobiles", "petroleum", "fuels", "filling", "petrol",
+    "textiles", "garments", "jewellers", "electronics", "hardware",
+    "pvt", "ltd", "limited", "llp", "inc", "corp", "company", "industries",
+    "technologies", "solutions", "services", "communications", "telecom",
+    "provisions", "departmental", "stationery", "salon", "spa", "studio",
+    "tiffin", "mess", "caterers", "catering", "juice", "tea", "coffee",
+}
+
+
+def business_hint(label: str, key: str | None) -> str | None:
+    """Why this counterparty looks like a business, or None if it doesn't.
+
+    Returns the *reason* rather than a bare boolean: "looks like a shop" is
+    not something a user can act on, whereas "vyapar.… is a shop-billing UPI
+    id" is checkable against what they know.
+    """
+    if key and "@" in key:
+        local, _, domain = key.partition("@")
+        for pattern, reason in _MERCHANT_VPA_PATTERNS:
+            if pattern.search(local):
+                return reason
+        for suffix, reason in _MERCHANT_VPA_DOMAINS.items():
+            if domain.lower().endswith(suffix):
+                return reason
+
+    words = re.sub(r"[^a-z0-9 ]", " ", (label or "").lower()).split()
+    hit = next((w for w in words if w in _BUSINESS_WORDS), None)
+    if hit:
+        return f'"{hit}" is a trading-name word, not part of a person\'s name'
+    return None
 
 
 def _rule_match(merchant: str, raw_text: str) -> str | None:

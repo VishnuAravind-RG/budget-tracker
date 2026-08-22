@@ -16,6 +16,13 @@ const KIND_LABEL = {
 }
 const INFLOW = new Set(['income', 'repayment'])
 
+const SOURCE_LABEL = {
+  sms: 'SMS',
+  gmail: 'email',
+  screenshot: 'screenshot',
+  import: 'imported',
+}
+
 export default function Transactions({ transactions, categories, monthLabel, onRecategorise, onDelete }) {
   const [editing, setEditing] = useState(null)
 
@@ -72,7 +79,11 @@ export default function Transactions({ transactions, categories, monthLabel, onR
                   )}
                   {t.counterparty && <span>{t.counterparty}</span>}
                   <span>{dateTime(t.created_at)}</span>
-                  {t.source === 'sms' && <span>· SMS</span>}
+                  {/* Where a row came from. "screenshot" matters most: those
+                      were read off a photo by a vision model rather than
+                      quoted from a bank, so they're the ones worth a second
+                      look if a figure seems wrong. */}
+                  {SOURCE_LABEL[t.source] && <span>· {SOURCE_LABEL[t.source]}</span>}
                 </div>
               </div>
 

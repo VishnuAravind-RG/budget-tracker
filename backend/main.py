@@ -3,9 +3,11 @@ import os
 import re
 import secrets
 import time
+import uuid
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import date as date_cls
+from datetime import datetime as datetime_cls
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -23,7 +25,15 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 import gmail_poll  # noqa: E402
 from auth import AUTH_TOKEN, require_token  # noqa: E402
-from categorizer import CATEGORIES, categorize, parse_alert_date, parse_bank_ref, parse_sms, payee_key_for  # noqa: E402
+from categorizer import (  # noqa: E402
+    CATEGORIES,
+    business_hint,
+    categorize,
+    parse_alert_date,
+    parse_bank_ref,
+    parse_sms,
+    payee_key_for,
+)
 from db import get_db, init_db  # noqa: E402
 from models import Budget, FuelFill, GmailAuth, LendingReminder, Payee, Todo, Transaction, Vehicle  # noqa: E402
 from receipt_scan import ReceiptScanError, gemini_configured, scan_receipt, scan_statement  # noqa: E402
@@ -39,8 +49,10 @@ from schemas import (  # noqa: E402
     MerchantUpdate,
     MileageOut,
     PayeeOut,
+    PayeeUpdate,
     ReceiptScanOut,
     SMSPayload,
+    ScreenshotImport,
     TodoIn,
     TodoOut,
     TodoUpdate,
@@ -125,6 +137,26 @@ api = APIRouter(dependencies=[Depends(require_token)])
 
 DEDUPE_WINDOW = timedelta(seconds=120)
 
+# Channels that deliver a transaction without anyone doing anything. Everything
+# else ("manual", "screenshot", "import") is the user typing, and says nothing
+# about whether automatic capture is still alive.
+AUTOMATED_SOURCES = ("sms", "gmail")
+
+# How long automatic capture may stay silent before the app says so.
+#
+# The whole thing rests on alerts arriving, and when they stop it fails
+# *silently*: MacroDroid stopped forwarding SMS for two days (Android revoked
+# its permission under "pause app activity if unused") and the app went on
+# looking perfectly healthy, just with less in it. Nothing was wrong on
+# screen — which is precisely the problem, and why this is worth a warning
+# rather than a log line.
+#
+# 36 hours, because every day in the live history except one carried at least
+# one alert, so a day and a half of total silence is genuinely unusual. A
+# false alarm costs a glance at a dismissible line; a missed outage costs
+# every transaction until someone happens to notice.
+CAPTURE_QUIET_HOURS = float(os.getenv("CAPTURE_QUIET_HOURS", "36"))
+
 
 def _resolve_month(month: int | None, year: int | None) -> tuple[int, int]:
     now = local_now()
@@ -187,7 +219,11 @@ async def ingest_sms_raw(request: Request, db: Session = Depends(get_db)):
     return await asyncio.to_thread(_ingest, text[:2000], db)
 
 
-def _ingest(text: str, db: Session):
+def _ingest(text: str, db: Session, source: str = "sms"):
+    """Store one bank alert. `source` records the channel it arrived by —
+    "sms" (MacroDroid) or "gmail" (the poller) — so capture_health() can say
+    *which* pipe went quiet rather than only that something did. Both feed
+    identical text through identical parsing; only the label differs."""
     parsed = parse_sms(text)
 
     if not parsed["is_transaction"]:
@@ -229,7 +265,14 @@ def _ingest(text: str, db: Session):
     # "Ss Hyderabad Biriyani Peravallur") and a shop can present slightly
     # different name text across messages, while its VPA is stable. Falls
     # back to a normalised name key for card swipes, which have no VPA.
-    payee_key = parsed.get("upi_id") or payee_key_for(merchant)
+    #
+    # A credit whose alert never named a sender is the exception: `merchant`
+    # there is a placeholder describing the receiving account ("Credit to
+    # HDFC ...9393"), not a counterparty. Keying off it would remember that
+    # placeholder as a payee and quietly fold every future anonymous credit,
+    # from anyone, into one identity that is never asked about again.
+    named = parsed.get("has_counterparty", True)
+    payee_key = parsed.get("upi_id") or (payee_key_for(merchant) if named else None)
     known: Payee | None = db.get(Payee, payee_key) if payee_key else None
 
     kind = "income" if direction == "credit" else "expense"
@@ -295,6 +338,15 @@ def _ingest(text: str, db: Session):
         if payee_key and "@" in payee_key and direction == "credit":
             needs_review = True
 
+        # Money arrived and the alert did not say from whom. That is worth a
+        # question rather than a silent "income" row: a real Rs 10,000 credit
+        # sat filed as income from "Unknown" for three weeks, and no screen in
+        # the app had any reason to mention it. There is no payee_key to
+        # remember here (see above), so this asks once per such credit — which
+        # is correct, since each one is a different unknown sender.
+        if direction == "credit" and not named:
+            needs_review = True
+
     # Date the transaction when the BANK says it happened, not when we
     # happened to read the alert. Guarded three ways: a date we can't parse
     # falls back to now, a future date is rejected outright (a mis-parse, or
@@ -314,7 +366,7 @@ def _ingest(text: str, db: Session):
         amount=parsed["amount"],
         direction=direction,
         category=category,
-        source="sms",
+        source=source,
         needs_review=needs_review,
         kind=kind,
         payee_key=payee_key,
@@ -402,7 +454,7 @@ async def gmail_poll_endpoint(db: Session = Depends(get_db)):
     except gmail_poll.GmailPollError as e:
         raise HTTPException(502, str(e)) from e
 
-    results = [_ingest(text, db) for text in texts]
+    results = [_ingest(text, db, source="gmail") for text in texts]
     row.last_poll_at = utc_now_naive()
     db.commit()
     return {"checked": len(texts), "results": results}
@@ -444,6 +496,122 @@ def add_manual(payload: ManualTransaction, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(txn)
     return txn
+
+
+@api.post("/transactions/screenshot-import")
+def screenshot_import(payload: ScreenshotImport, db: Session = Depends(get_db)):
+    """Book a whole screenshot's worth of confirmed rows in one go.
+
+    Two things this does that looping over /transactions/manual did not:
+
+    1. One request, one commit. The client used to POST each row separately,
+       so a six-row screenshot was six round trips to a single-worker free
+       backend, and a failure partway left half a screenshot imported with no
+       record of which half.
+    2. Tags every row with `source="screenshot"` and a shared batch id. Before
+       this, imported rows were indistinguishable from ones typed by hand, so
+       there was no way to see what an upload brought in and no way to undo
+       one — which matters because this is a daily habit and the rows come
+       from a vision model reading a photo.
+    """
+    batch = uuid.uuid4().hex[:12]
+    created = []
+
+    for row in payload.rows:
+        label = row.merchant or ("Someone" if row.kind in ("friend", "friend_settle") else "Transaction")
+
+        # Backstop for the client sending a self-transfer as an ordinary
+        # expense. It did exactly that once and booked a GPay row literally
+        # labelled "Self transfer" as Rs 10,000 of spending — money moved
+        # between the owner's own accounts, counted as a purchase, inflating
+        # the month by a fifth. The client is fixed too; this makes the same
+        # mistake unrepeatable from any caller.
+        kind_choice = row.kind
+        if kind_choice == "expense" and row.category == "Transfer":
+            kind_choice = "self"
+
+        kind, category, counterparty = _resolve_kind(
+            kind_choice, row.direction, label, row.category, row.category or "Uncategorized"
+        )
+
+        occurred_at = None
+        if row.occurred_on:
+            y, m, d = (int(part) for part in row.occurred_on.split("-"))
+            try:
+                occurred_at = local_date_to_utc(y, m, d)
+            except ValueError as exc:
+                raise HTTPException(422, f"Not a real date: {row.occurred_on}") from exc
+            if occurred_at > utc_now_naive() + timedelta(days=1):
+                raise HTTPException(422, f"{row.occurred_on} is in the future")
+
+        txn = Transaction(
+            merchant=label,
+            amount=row.amount,
+            direction=row.direction,
+            category=category,
+            source="screenshot",
+            needs_review=False,
+            kind=kind,
+            counterparty=counterparty,
+            import_batch=batch,
+            **({"created_at": occurred_at} if occurred_at else {}),
+        )
+        db.add(txn)
+        created.append(txn)
+
+    db.commit()
+    return {
+        "batch": batch,
+        "added": len(created),
+        # Only what actually counts as spending — reporting the raw sum would
+        # include a self-transfer and overstate what was just added.
+        "total": round(sum(t.amount for t in created if t.kind == "expense"), 2),
+    }
+
+
+@api.get("/imports")
+def list_imports(limit: int = Query(default=10, ge=1, le=50), db: Session = Depends(get_db)):
+    """Recent screenshot imports, newest first — what each one brought in, so
+    a bad upload can be found and undone."""
+    rows = (
+        db.query(
+            Transaction.import_batch,
+            func.count(Transaction.id),
+            func.sum(Transaction.amount),
+            func.max(Transaction.ingested_at),
+        )
+        .filter(Transaction.import_batch.isnot(None))
+        .group_by(Transaction.import_batch)
+        .all()
+    )
+    batches = [
+        {
+            "batch": batch,
+            "count": int(count or 0),
+            "total": round(float(total or 0), 2),
+            "at": at.isoformat() + "Z" if at else None,
+        }
+        for batch, count, total, at in rows
+    ]
+    batches.sort(key=lambda b: b["at"] or "", reverse=True)
+    return batches[:limit]
+
+
+@api.delete("/imports/{batch}")
+def undo_import(batch: str, db: Session = Depends(get_db)):
+    """Undo one screenshot import completely.
+
+    Deletes only rows carrying this batch id, so anything logged by hand or
+    captured from a bank alert in between is untouched — the reason the batch
+    id exists at all.
+    """
+    rows = db.query(Transaction).filter(Transaction.import_batch == batch).all()
+    if not rows:
+        raise HTTPException(404, "No import with that id (already undone?)")
+    for txn in rows:
+        db.delete(txn)
+    db.commit()
+    return {"status": "undone", "batch": batch, "removed": len(rows)}
 
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8MB — generous for a phone photo, small enough to stay fast
@@ -713,6 +881,200 @@ def stats_summary(
     }
 
 
+# How many days past its usual date a recurring payment may drift before it is
+# called overdue rather than simply upcoming. Rent lands on the 3rd one month
+# and the 5th the next; nobody wants that reported as a missed payment.
+RECURRING_GRACE_DAYS = 3
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+@api.get("/stats/recurring")
+def recurring_expectations(
+    months_back: int = Query(default=6, ge=2, le=24),
+    db: Session = Depends(get_db),
+):
+    """Payments that repeat every month — and, for each, whether this month's
+    has actually happened yet.
+
+    Detecting recurrence was already possible client-side, but it only ever
+    described the past: "you pay this every month" is a fact, not a prompt.
+    The useful half is the one this adds — the maid's salary, the gym fee, the
+    rent, each either ticked off or still outstanding with the date it usually
+    lands on. That is the difference between a record and something that tells
+    you a payment has been forgotten.
+
+    Median rather than mean throughout: one unusually large grocery run should
+    not drag the expected amount up, and one payment made early on the 1st
+    should not drag the expected date to the start of the month.
+    """
+    now = local_now()
+    year, month = now.year, now.month
+    for _ in range(months_back):
+        month -= 1
+        if month < 1:
+            month, year = 12, year - 1
+    window_start, _ = month_range_utc(year, month)
+
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.kind == "expense", Transaction.created_at >= window_start)
+        .all()
+    )
+
+    groups: dict[tuple[str, str], dict] = {}
+    for txn in rows:
+        name = (txn.merchant or "").strip()
+        if not name or name.lower() == "unknown":
+            continue
+        key = (name.lower(), txn.category)
+        day_key = local_day_key(txn.created_at)
+        entry = groups.setdefault(key, {
+            "label": name, "category": txn.category, "months": set(),
+            "amounts": [], "days": [], "last_seen": day_key,
+        })
+        entry["months"].add(day_key[:7])
+        entry["amounts"].append(float(txn.amount))
+        # Rows bulk-loaded from a spreadsheet only ever knew a month, so they
+        # are anchored to the 1st (see /transactions/import). They are real
+        # evidence that the month happened, but their "day" is an artefact —
+        # counting it would drag every expected date towards the 1st.
+        if txn.source != "import":
+            entry["days"].append(int(day_key[-2:]))
+        entry["label"] = name if day_key >= entry["last_seen"] else entry["label"]
+        entry["last_seen"] = max(entry["last_seen"], day_key)
+
+    this_month = f"{now.year:04d}-{now.month:02d}"
+    today = now.day
+    out = []
+
+    for entry in groups.values():
+        if len(entry["months"]) < 2:
+            continue
+        paid = this_month in entry["months"]
+        # Months other than the current one — the current one is what's being
+        # predicted, so including a part-finished month would let a payment
+        # already made this month inform its own expected date.
+        past_months = len(entry["months"]) - (1 if paid else 0)
+        if past_months < 2:
+            continue
+
+        typical_day = int(round(_median(entry["days"]))) if entry["days"] else None
+        if paid:
+            status, days_until = "paid", None
+        elif typical_day is None:
+            status, days_until = "due", None
+        else:
+            days_until = typical_day - today
+            status = "overdue" if days_until < -RECURRING_GRACE_DAYS else "due"
+
+        out.append({
+            "merchant": entry["label"],
+            "category": entry["category"],
+            "typical_amount": round(_median(entry["amounts"]), 2),
+            "typical_day": typical_day,
+            "months": len(entry["months"]),
+            "last_seen": entry["last_seen"],
+            "status": status,
+            "days_until": days_until,
+        })
+
+    # Overdue first — that is the only part of this list that needs acting on.
+    order = {"overdue": 0, "due": 1, "paid": 2}
+    out.sort(key=lambda r: (order[r["status"]], r["days_until"] if r["days_until"] is not None else 99, -r["typical_amount"]))
+    return out
+
+
+@api.get("/stats/capture-health")
+def capture_health(db: Session = Depends(get_db)):
+    """Is automatic capture still alive?
+
+    Answers the question nothing else in the app could: bank alerts simply
+    stopping produces no error anywhere — the totals just quietly stop
+    growing, and every screen keeps looking correct. See CAPTURE_QUIET_HOURS.
+
+    Measured on `ingested_at` (when the alert reached us), never `created_at`
+    (when the bank says the payment happened). Those are different by design,
+    and back-dated alerts make created_at useless for "have we heard anything
+    lately" — an email arriving today about last Tuesday would read as five
+    days of silence.
+
+    A channel that has never delivered anything is not reported as broken:
+    Gmail polling was set up long after SMS forwarding, and calling a pipe
+    that was never connected "quiet" is noise, not a warning.
+    """
+    now = utc_now_naive()
+
+    rows = (
+        db.query(Transaction.source, func.max(Transaction.ingested_at))
+        .filter(Transaction.source.in_(AUTOMATED_SOURCES))
+        .group_by(Transaction.source)
+        .all()
+    )
+
+    channels = []
+    latest = None
+    latest_source = None
+    for source, last_at in rows:
+        if last_at is None:
+            continue
+        hours = round((now - last_at).total_seconds() / 3600, 1)
+        channels.append({
+            "source": source,
+            "last_at": last_at.isoformat() + "Z",
+            "hours_since": hours,
+            "quiet": hours >= CAPTURE_QUIET_HOURS,
+        })
+        if latest is None or last_at > latest:
+            latest, latest_source = last_at, source
+
+    channels.sort(key=lambda c: c["hours_since"])
+
+    if latest is None:
+        # Nothing has ever been captured automatically. Not an outage —
+        # there is no pipe to have broken yet.
+        return {
+            "quiet": False,
+            "threshold_hours": CAPTURE_QUIET_HOURS,
+            "hours_since_last": None,
+            "last_at": None,
+            "last_source": None,
+            "channels": [],
+            "manual_since": 0,
+        }
+
+    hours_since = round((now - latest).total_seconds() / 3600, 1)
+
+    # Transactions the user typed in *since* the last automatic one. This is
+    # the tell that separates "quiet because you haven't spent anything" from
+    # "quiet because the pipe is dead": still spending, still logging it by
+    # hand, and not one alert came in on its own.
+    manual_since = (
+        db.query(func.count(Transaction.id))
+        .filter(
+            Transaction.source.notin_(AUTOMATED_SOURCES),
+            Transaction.ingested_at > latest,
+        )
+        .scalar()
+    ) or 0
+
+    return {
+        "quiet": hours_since >= CAPTURE_QUIET_HOURS,
+        "threshold_hours": CAPTURE_QUIET_HOURS,
+        "hours_since_last": hours_since,
+        "last_at": latest.isoformat() + "Z",
+        "last_source": latest_source,
+        "channels": channels,
+        "manual_since": int(manual_since),
+    }
+
+
 @api.get("/transactions", response_model=list[TransactionOut])
 def list_transactions(
     month: int | None = Query(default=None, ge=1, le=12),
@@ -730,12 +1092,22 @@ def list_transactions(
 
 @api.get("/transactions/needs-review", response_model=list[TransactionOut])
 def needs_review(db: Session = Depends(get_db)):
-    return (
+    rows = (
         db.query(Transaction)
         .filter(Transaction.needs_review.is_(True))
         .order_by(Transaction.created_at.desc())
         .all()
     )
+    # Attach the business hint here rather than storing it: it is derived from
+    # the merchant name and UPI id, both of which can improve later, and a
+    # stored copy would go stale. Only the review queue needs it — it is the
+    # one place the shop/person answer is still open.
+    return [
+        TransactionOut.model_validate(t).model_copy(
+            update={"business_hint": business_hint(t.merchant or "", t.payee_key)}
+        )
+        for t in rows
+    ]
 
 
 def _refresh_merchant_names(db: Session) -> int:
@@ -1159,7 +1531,25 @@ def list_payees(db: Session = Depends(get_db)):
     wallet, or your own account. Read-only visibility into memory that was
     previously invisible: it silently drove classification (new sightings
     of the same payee skip Review) but had no way to actually be seen."""
-    return db.query(Payee).order_by(Payee.created_at.desc()).all()
+    payees = db.query(Payee).order_by(Payee.created_at.desc()).all()
+    counts = dict(
+        db.query(Transaction.payee_key, func.count(Transaction.id))
+        .filter(Transaction.payee_key.isnot(None))
+        .group_by(Transaction.payee_key)
+        .all()
+    )
+    return [
+        PayeeOut.model_validate(p).model_copy(update={
+            # Only questioned on answers of "a person". A shop remembered as a
+            # shop needs no second-guessing, and flagging those too would bury
+            # the one case that matters in noise.
+            "business_hint": (
+                business_hint(p.label, p.key) if p.kind in ("friend", "friend_settle") else None
+            ),
+            "used_by": counts.get(p.key, 0),
+        })
+        for p in payees
+    ]
 
 
 @api.post("/lending/{person:path}/repaid", response_model=TransactionOut)
@@ -1220,6 +1610,82 @@ def record_repayment(
     return txn
 
 
+@api.patch("/payees/{key:path}")
+def update_payee(key: str, payload: PayeeUpdate, db: Session = Depends(get_db)):
+    """Correct a remembered 'who is this?' answer — and, optionally, every
+    transaction it already decided.
+
+    DELETE (below) only stops an answer being applied in future. That is not
+    enough when the answer was wrong: a bakery answered as "a person" had its
+    payments filed as money lent out, sat in the who-owes-you list next to
+    real friends, and — because a remembered payee is never asked about again
+    — would have kept doing so silently forever. Forgetting it would fix the
+    next payment while leaving all the wrong ones in place.
+
+    `apply_to_past` re-runs each affected transaction through _resolve_kind()
+    with the corrected answer, which is the same function that classified it
+    in the first place, so the two can't disagree about what "friend" means.
+    Off by default: it moves historical totals, and that should be a choice.
+    """
+    payee = db.get(Payee, key)
+    if not payee:
+        raise HTTPException(404, "Not remembered")
+
+    label = (payload.label or payee.label).strip() or payee.label
+    payee.label = label
+    payee.kind = payload.kind
+    # A default category is only meaningful for a shop. Carrying "Lending"
+    # over onto a corrected answer would re-apply the very mistake being fixed.
+    payee.default_category = payload.category if payload.kind == "expense" else None
+
+    updated = 0
+    if payload.apply_to_past:
+        rows = db.query(Transaction).filter(Transaction.payee_key == key).all()
+        for txn in rows:
+            # The old category is only a sane fallback if it isn't itself a
+            # product of the wrong answer. "Lending" and "Transfer" are
+            # markers of a non-spending kind, so keeping one on a row now
+            # being re-filed as an ordinary purchase would leave the number
+            # right and the label nonsense. Ask instead of guessing.
+            stale = txn.category in ("Lending", "Transfer")
+            fallback = "Uncategorized" if stale else txn.category
+            txn.kind, txn.category, txn.counterparty = _resolve_kind(
+                payload.kind, txn.direction, label, payload.category, fallback
+            )
+            txn.merchant = label
+            if payload.kind == "expense" and txn.category == "Uncategorized":
+                txn.needs_review = True
+            updated += 1
+
+        # A person who turns out to be a shop has no debt to be nudged about.
+        # Left behind, the reminder keeps firing about money that was never
+        # lent to anyone.
+        for person in {payee.label} | {r.counterparty for r in rows if r.counterparty}:
+            still_lending = (
+                db.query(Transaction)
+                .filter(
+                    Transaction.kind.in_(("lend", "repayment")),
+                    Transaction.counterparty == person,
+                )
+                .first()
+            )
+            reminder = db.get(LendingReminder, person)
+            if reminder and not still_lending:
+                db.delete(reminder)
+
+    db.commit()
+    db.refresh(payee)
+    return {
+        "payee": PayeeOut.model_validate(payee).model_copy(update={
+            "business_hint": (
+                business_hint(payee.label, payee.key)
+                if payee.kind in ("friend", "friend_settle") else None
+            ),
+        }),
+        "updated": updated,
+    }
+
+
 @api.delete("/payees/{key:path}")
 def forget_payee(key: str, db: Session = Depends(get_db)):
     """Forget one remembered answer, so the next transaction from that
@@ -1239,6 +1705,50 @@ def forget_payee(key: str, db: Session = Depends(get_db)):
     db.delete(payee)
     db.commit()
     return {"status": "forgotten", "key": key}
+
+
+@api.get("/export/all")
+def export_all(db: Session = Depends(get_db)):
+    """Everything, as plain JSON — the whole database in one response.
+
+    All of this lives in a single free-tier Postgres project with no backup of
+    any kind, and rows have been deleted by hand more than once while
+    correcting double-counted months. Nightly snapshots are cheap insurance;
+    see .github/workflows/backup.yml, which encrypts the result before storing
+    it, because this repository is public.
+
+    Deliberately excludes the gmail_auth table. It holds a Google OAuth
+    refresh token — a live credential, not data — and a backup file is exactly
+    the wrong place for one. Re-connecting Gmail after a restore is a single
+    visit to /gmail/auth/start; leaking a token that never expires is not
+    undoable.
+    """
+    def dump(model):
+        return [
+            {
+                column.name: (
+                    value.isoformat() + "Z" if isinstance(value, datetime_cls) else value
+                )
+                for column in model.__table__.columns
+                for value in (getattr(obj, column.name),)
+            }
+            for obj in db.query(model).all()
+        ]
+
+    tables = {
+        "transactions": dump(Transaction),
+        "budgets": dump(Budget),
+        "payees": dump(Payee),
+        "vehicles": dump(Vehicle),
+        "fuel_fills": dump(FuelFill),
+        "todos": dump(Todo),
+        "lending_reminders": dump(LendingReminder),
+    }
+    return {
+        "exported_at": utc_now_naive().isoformat() + "Z",
+        "counts": {name: len(rows) for name, rows in tables.items()},
+        **tables,
+    }
 
 
 @api.get("/categories")

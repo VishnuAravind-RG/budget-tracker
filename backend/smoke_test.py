@@ -6,6 +6,7 @@ Uses a throwaway SQLite file and a fake token, so it never touches budget.db
 and never calls the Anthropic API (unrecognised merchants just land in review).
 """
 
+import json
 import os
 import pathlib
 import sys
@@ -32,12 +33,12 @@ from categorizer import parse_alert_date, parse_sms  # noqa: E402
 client = TestClient(main.app)
 AUTH = {"Authorization": "Bearer smoke-test-token"}
 failures = []
+passed = []
 
 
 def check(label, condition, detail=""):
     print(f"{'PASS' if condition else 'FAIL'}  {label}{'' if condition else f'  -> {detail}'}")
-    if not condition:
-        failures.append(label)
+    (passed if condition else failures).append(label)
 
 
 # --- auth ---------------------------------------------------------------------
@@ -909,12 +910,6 @@ check("scan-receipt still checks key before validating the file", empty_image.st
 
 check("scan-receipt needs auth", client.post("/ai/scan-receipt", files={"image": ("x.jpg", b"123", "image/jpeg")}).status_code == 401)
 
-print()
-if failures:
-    print(f"{len(failures)} FAILED: {failures}")
-    sys.exit(1)
-print("All checks passed.")
-
 # --- a free-text note, for when the category explains nothing --------------------
 # "Other" carries no meaning, so the user's own words are the only record of
 # what a payment actually was. Kept separate from `merchant` so it can never
@@ -931,3 +926,294 @@ check("note does not overwrite the merchant name", r["merchant"] == "HARI HARAN 
 remembered = {p["key"]: p for p in client.get("/payees", headers=AUTH).json()}
 check("remembered label is the merchant, never the note",
       remembered["notetest@ybl"]["label"] == "HARI HARAN AGENCIES 3", remembered.get("notetest@ybl"))
+
+
+# --- credit alerts that name a sender, and ones that don't -----------------------
+# Three real credits totalling Rs 11,912 - one of them Rs 10,000 - were stored
+# as merchant "Unknown" because HDFC's email template puts the sender in a
+# lettered field with no VPA beside it, and the pattern required the VPA.
+named_credit = client.post("/sms/ingest", json={"text":
+    "Dear Customer, Greetings from HDFC Bank! We're writing to inform you that Rs.1764.00 has been "
+    "successfully credited to your HDFC Bank account ending in 9393. Transaction Details: "
+    "a. Date: 01-08-26 b. Sender: SG JEYASHRI c. Amount: Rs.1764.00 Ref 810000021"
+}, headers=AUTH).json()
+check("a sender named without a VPA is read", named_credit["transaction"]["merchant"] == "SG JEYASHRI", named_credit["transaction"])
+check("...and still filed as income", named_credit["transaction"]["kind"] == "income", named_credit["transaction"])
+
+# The same template truncated before the sender field - which is how those rows
+# actually arrived. Nothing can name the sender here, so the test is that the
+# app says so honestly instead of inventing a name or shrugging.
+anon = client.post("/sms/ingest", json={"text":
+    "Dear Customer, Greetings from HDFC Bank! We're writing to inform you that Rs.10000.00 has been "
+    "successfully credited to your HDFC Bank account ending in 9393. Transaction Details: "
+    "a. Date: 02-08-26 b. Ref 810000022"
+}, headers=AUTH).json()["transaction"]
+check("an unnamed credit says which account it landed in, not 'Unknown'",
+      anon["merchant"] == "Credit to HDFC ...9393", anon)
+check("an unnamed credit is queued for review rather than filed silently",
+      anon["needs_review"] is True, anon)
+# The placeholder must never become an identity: keyed off, it would fold every
+# anonymous credit from anyone into one remembered "payee", never asked about.
+check("an unnamed credit is NOT remembered as a payee", anon["payee_key"] is None, anon)
+
+remembered_keys = {p["key"] for p in client.get("/payees", headers=AUTH).json()}
+check("...so no placeholder payee is created",
+      not any("credit to hdfc" in k.lower() for k in remembered_keys), remembered_keys)
+
+# A debit's "From <bank>" line must not be mistaken for a sender by the widened
+# credit patterns - that would name every card swipe after the user's own bank.
+debit_from = client.post("/sms/ingest", json={"text":
+    "Sent Rs.76.00\nFrom HDFC Bank A/C *9393\nTo Swiggy\nOn 22-08-26\nRef 810000023"
+}, headers=AUTH).json()["transaction"]
+check("a debit's own 'From <bank>' line is not read as a counterparty",
+      debit_from["merchant"] == "Swiggy", debit_from)
+
+for _t in (named_credit["transaction"], anon, debit_from):
+    client.delete(f"/transactions/{_t['id']}", headers=AUTH)
+
+# --- capture health: has automatic capture gone quiet? ---------------------------
+health = client.get("/stats/capture-health", headers=AUTH).json()
+check("capture health reports a last-heard time", health["last_at"] is not None, health)
+check("capture health is not quiet right after an alert", health["quiet"] is False, health)
+check("capture health names the channel", health["last_source"] == "sms", health)
+check("capture health lists per-channel detail", any(c["source"] == "sms" for c in health["channels"]), health)
+# A channel that never delivered anything is not an outage - Gmail polling was
+# connected long after SMS forwarding, and calling a pipe that was never
+# plugged in "quiet" is noise, not a warning.
+check("a channel that never delivered isn't reported as broken",
+      all(c["source"] != "gmail" for c in health["channels"]), health)
+
+# Backdate the arrival time of every automated row and the alarm must fire.
+# ingested_at, not created_at: an email arriving today about last Tuesday must
+# not read as five days of silence.
+from datetime import timedelta as _td  # noqa: E402
+
+from db import SessionLocal  # noqa: E402
+from models import Transaction as _Txn  # noqa: E402
+from timeutil import local_now as _local_now  # noqa: E402
+from timeutil import utc_now_naive as _now  # noqa: E402
+
+_session = SessionLocal()
+_moved = []
+for _row in _session.query(_Txn).filter(_Txn.source.in_(("sms", "gmail"))).all():
+    _moved.append((_row.id, _row.ingested_at))
+    _row.ingested_at = _now() - _td(hours=50)
+_session.commit()
+_session.close()
+
+quiet = client.get("/stats/capture-health", headers=AUTH).json()
+check("50 hours of silence trips the alarm", quiet["quiet"] is True, quiet)
+check("...and says how long it has been", quiet["hours_since_last"] >= 49, quiet)
+check("...and counts what was typed in by hand meanwhile", quiet["manual_since"] > 0, quiet)
+
+_session = SessionLocal()
+for _id, _when in _moved:
+    _session.get(_Txn, _id).ingested_at = _when
+_session.commit()
+_session.close()
+check("restoring the timestamps clears the alarm",
+      client.get("/stats/capture-health", headers=AUTH).json()["quiet"] is False)
+
+# --- correcting a remembered answer ----------------------------------------------
+# The real case: RADDLINS FOOD, a bakery, answered as "a person". Its payments
+# were filed as money lent out, it sat in the who-owes-you list beside actual
+# friends, and a remembered payee is never asked about again - so nothing would
+# ever have surfaced it.
+client.post("/sms/ingest", json={"text":
+    "Rs.67.00 debited from a/c XXXX1234 on 19-08-26 to VPA vyapar.175693560002@hdfcbank (RADDLINS FOOD) Ref 810000031"
+}, headers=AUTH)
+queued = client.get("/transactions/needs-review", headers=AUTH).json()[0]
+check("the review queue warns when a payee looks like a business",
+      queued["business_hint"] is not None and "Vyapar" in (queued["business_hint"] or ""), queued)
+
+client.patch(f"/transactions/{queued['id']}/classify",
+             json={"kind": "friend", "label": "RADDLINS FOOD"}, headers=AUTH)
+lent = client.get("/lending", headers=AUTH).json()
+check("answering 'a person' does put a shop in the lending list (the bug)",
+      any(p["person"] == "RADDLINS FOOD" for p in lent), lent)
+
+payees = {p["key"]: p for p in client.get("/payees", headers=AUTH).json()}
+bakery = payees["vyapar.175693560002@hdfcbank"]
+check("the Remembered list flags it as shop-shaped", bakery["business_hint"] is not None, bakery)
+check("...and says how many transactions the answer decided", bakery["used_by"] >= 1, bakery)
+
+# A genuine friend must NOT be flagged - a false warning here pushes people to
+# mis-file real lending as spending, which is the more expensive mistake.
+client.post("/sms/ingest", json={"text":
+    "Rs.500.00 debited from a/c XXXX1234 on 19-08-26 to VPA scientificmonesh@okhdfcbank (Monesh Kumar R) Ref 810000032"
+}, headers=AUTH)
+friend_row = client.get("/transactions/needs-review", headers=AUTH).json()[0]
+client.patch(f"/transactions/{friend_row['id']}/classify",
+             json={"kind": "friend", "label": "Monesh Kumar R"}, headers=AUTH)
+payees = {p["key"]: p for p in client.get("/payees", headers=AUTH).json()}
+check("a real person is not flagged as a business",
+      payees["scientificmonesh@okhdfcbank"]["business_hint"] is None,
+      payees["scientificmonesh@okhdfcbank"])
+
+spent_before_fix = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+fix = client.patch("/payees/vyapar.175693560002@hdfcbank",
+                   json={"kind": "expense", "category": "Food & Dining", "apply_to_past": True},
+                   headers=AUTH).json()
+check("correcting a payee re-files the transactions it already decided", fix["updated"] >= 1, fix)
+check("the corrected answer is no longer flagged", fix["payee"]["business_hint"] is None, fix)
+check("a corrected shop keeps its category as the remembered default",
+      fix["payee"]["default_category"] == "Food & Dining", fix)
+
+lent_after = client.get("/lending", headers=AUTH).json()
+check("the shop is gone from the lending list",
+      not any(p["person"] == "RADDLINS FOOD" for p in lent_after), lent_after)
+check("the real friend stays in the lending list",
+      any(p["person"] == "Monesh Kumar R" for p in lent_after), lent_after)
+spent_after_fix = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+check("money wrongly counted as lending becomes spending again",
+      round(spent_after_fix - spent_before_fix, 2) == 67.0,
+      {"before": spent_before_fix, "after": spent_after_fix})
+
+# Correcting without apply_to_past must change nothing historical - moving old
+# totals is a choice, not a side effect.
+before_noapply = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+client.patch("/payees/scientificmonesh@okhdfcbank",
+             json={"kind": "friend", "label": "Monesh Kumar R"}, headers=AUTH)
+check("correcting without apply_to_past leaves history alone",
+      client.get("/budget/summary", headers=AUTH).json()["total_spent"] == before_noapply)
+# Correcting to a shop without naming a category must not leave the row
+# labelled "Lending" - the kind would be right and the label nonsense. It asks
+# instead of guessing.
+client.post("/sms/ingest", json={"text":
+    "Rs.90.00 debited from a/c XXXX1234 on 19-08-26 to VPA nocategory@ybl (SOME SHOP) Ref 810000033"
+}, headers=AUTH)
+_row = client.get("/transactions/needs-review", headers=AUTH).json()[0]
+client.patch(f"/transactions/{_row['id']}/classify", json={"kind": "friend", "label": "SOME SHOP"}, headers=AUTH)
+client.patch("/payees/nocategory@ybl", json={"kind": "expense", "apply_to_past": True}, headers=AUTH)
+_fixed = next(t for t in client.get("/transactions", headers=AUTH).json() if t["id"] == _row["id"])
+check("re-filing to a shop with no category given drops the stale 'Lending' label",
+      _fixed["category"] == "Uncategorized", _fixed)
+check("...and asks for the real category instead of guessing", _fixed["needs_review"] is True, _fixed)
+client.delete(f"/transactions/{_row['id']}", headers=AUTH)
+
+check("correcting an unremembered payee -> 404",
+      client.patch("/payees/nobody@nowhere", json={"kind": "expense"}, headers=AUTH).status_code == 404)
+check("an invalid corrected kind is rejected",
+      client.patch("/payees/scientificmonesh@okhdfcbank", json={"kind": "bogus"}, headers=AUTH).status_code == 422)
+
+# --- screenshot imports arrive as an undoable batch -------------------------------
+before_import = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+batch_res = client.post("/transactions/screenshot-import", json={"rows": [
+    {"amount": 232, "direction": "debit", "category": "Shopping", "merchant": "Amazon Pay Gift Card", "occurred_on": "2026-08-21"},
+    {"amount": 344, "direction": "debit", "category": "Food & Dining", "merchant": "Popeyes", "occurred_on": "2026-08-21"},
+    # A GPay "Self transfer" row, sent as a plain expense the way the client
+    # once did. Booking this as spending overstated a real month by Rs 10,000.
+    {"amount": 10000, "direction": "debit", "category": "Transfer", "merchant": "Self transfer"},
+]}, headers=AUTH).json()
+check("a screenshot imports as one batch", batch_res["added"] == 3, batch_res)
+check("the batch reports only what counts as spending", batch_res["total"] == 576.0, batch_res)
+after_import = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+check("a self-transfer in a screenshot never becomes spending",
+      round(after_import - before_import, 2) == 576.0, {"before": before_import, "after": after_import})
+
+imported = [t for t in client.get("/transactions", headers=AUTH).json()
+            if t.get("import_batch") == batch_res["batch"]]
+check("imported rows are tagged as coming from a screenshot",
+      len(imported) == 3 and all(t["source"] == "screenshot" for t in imported), imported)
+check("the self-transfer row is filed as a transfer, not an expense",
+      next(t for t in imported if t["amount"] == 10000)["kind"] == "transfer", imported)
+
+listed = client.get("/imports", headers=AUTH).json()
+check("the import is listed for review",
+      any(b["batch"] == batch_res["batch"] and b["count"] == 3 for b in listed), listed)
+
+# Something logged by hand between the import and the undo must survive it -
+# the whole reason the batch id exists.
+keeper = client.post("/transactions/manual",
+                     json={"amount": 55, "direction": "debit", "category": "Food & Dining", "merchant": "KEEP ME"},
+                     headers=AUTH).json()
+undo = client.delete(f"/imports/{batch_res['batch']}", headers=AUTH).json()
+check("undoing an import removes exactly its own rows", undo["removed"] == 3, undo)
+check("undo restores the previous total",
+      client.get("/budget/summary", headers=AUTH).json()["total_spent"] == round(before_import + 55, 2))
+check("undo leaves everything else alone",
+      any(t["id"] == keeper["id"] for t in client.get("/transactions", headers=AUTH).json()))
+check("undoing the same import twice -> 404",
+      client.delete(f"/imports/{batch_res['batch']}", headers=AUTH).status_code == 404)
+client.delete(f"/transactions/{keeper['id']}", headers=AUTH)
+check("a screenshot row dated in the future is refused",
+      client.post("/transactions/screenshot-import",
+                  json={"rows": [{"amount": 10, "direction": "debit", "category": "Other", "occurred_on": "2099-01-01"}]},
+                  headers=AUTH).status_code == 422)
+check("an empty screenshot import is refused",
+      client.post("/transactions/screenshot-import", json={"rows": []}, headers=AUTH).status_code == 422)
+
+# --- recurring payments: expected this month, and whether they've happened --------
+_today = _local_now()
+
+
+def _month_back(n):
+    y, m = _today.year, _today.month
+    for _ in range(n):
+        m -= 1
+        if m < 1:
+            m, y = 12, y - 1
+    return y, m
+
+
+for _n in (1, 2):
+    _y, _m = _month_back(_n)
+    client.post("/transactions/manual", json={
+        "amount": 2000, "direction": "debit", "category": "Other",
+        "merchant": "MAID SALARY", "occurred_on": f"{_y:04d}-{_m:02d}-05"}, headers=AUTH)
+    client.post("/transactions/manual", json={
+        "amount": 874, "direction": "debit", "category": "Rent",
+        "merchant": "WWW RENTOMOJO COM", "occurred_on": f"{_y:04d}-{_m:02d}-02"}, headers=AUTH)
+# Rentomojo has already been paid this month; the maid has not.
+paid_this_month = client.post("/transactions/manual", json={
+    "amount": 874, "direction": "debit", "category": "Rent",
+    "merchant": "WWW RENTOMOJO COM"}, headers=AUTH).json()
+# Seen once only - must not be called recurring on the strength of one sighting.
+once = client.post("/transactions/manual", json={
+    "amount": 300, "direction": "debit", "category": "Shopping",
+    "merchant": "ONE OFF SHOP"}, headers=AUTH).json()
+
+rec = {r["merchant"]: r for r in client.get("/stats/recurring", headers=AUTH).json()}
+check("a payment seen in several months is detected", "MAID SALARY" in rec, list(rec))
+check("...with the amount it usually is", rec.get("MAID SALARY", {}).get("typical_amount") == 2000.0, rec.get("MAID SALARY"))
+check("...and the day it usually lands", rec.get("MAID SALARY", {}).get("typical_day") == 5, rec.get("MAID SALARY"))
+check("something paid already this month is marked paid",
+      rec.get("WWW RENTOMOJO COM", {}).get("status") == "paid", rec.get("WWW RENTOMOJO COM"))
+_expected_status = "overdue" if _today.day - 5 > 3 else "due"
+check(f"something not yet paid reads as '{_expected_status}' on day {_today.day}",
+      rec.get("MAID SALARY", {}).get("status") == _expected_status, rec.get("MAID SALARY"))
+check("...counting the days from today",
+      rec.get("MAID SALARY", {}).get("days_until") == 5 - _today.day, rec.get("MAID SALARY"))
+check("a one-off purchase is not called recurring", "ONE OFF SHOP" not in rec, list(rec))
+_statuses = [r["status"] for r in client.get("/stats/recurring", headers=AUTH).json()]
+check("overdue items sort to the front",
+      _statuses == sorted(_statuses, key=lambda st: {"overdue": 0, "due": 1, "paid": 2}[st]), _statuses)
+client.delete(f"/transactions/{once['id']}", headers=AUTH)
+client.delete(f"/transactions/{paid_this_month['id']}", headers=AUTH)
+
+# --- full export, for the nightly backup ------------------------------------------
+dump = client.get("/export/all", headers=AUTH).json()
+for _table in ("transactions", "budgets", "payees", "vehicles", "fuel_fills", "todos", "lending_reminders"):
+    check(f"export includes {_table}", _table in dump, list(dump))
+check("export counts match the rows it carries",
+      all(dump["counts"][t] == len(dump[t]) for t in dump["counts"]), dump["counts"])
+check("export carries real transactions", len(dump["transactions"]) > 0, dump["counts"])
+check("exported timestamps are serialised, not dropped",
+      isinstance(dump["transactions"][0]["created_at"], str), dump["transactions"][0])
+# The Gmail refresh token is a live credential, not data. A backup file is
+# exactly the wrong place for one - especially with a public repository.
+check("export deliberately excludes the Gmail refresh token", "gmail_auth" not in dump, list(dump))
+check("no OAuth refresh token anywhere in the export",
+      "refresh_token" not in json.dumps(dump), "found a refresh_token key")
+check("export needs auth", client.get("/export/all").status_code == 401)
+
+
+# --- report ---------------------------------------------------------------------
+# Must stay the LAST thing in this file. It used to sit in the middle, so the
+# checks below it printed PASS/FAIL but could not fail the run — a broken one
+# would have exited 0 and reported "All checks passed" two lines earlier.
+print()
+if failures:
+    print(f"{len(failures)} FAILED: {failures}")
+    sys.exit(1)
+print(f"All {len(passed)} checks passed.")

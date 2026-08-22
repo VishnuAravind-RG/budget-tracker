@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { moneyExact } from '../format.js'
 
@@ -14,6 +14,13 @@ import { moneyExact } from '../format.js'
  * detected server-side and unticked by default, which is what makes the same
  * screenshot safe to upload twice — otherwise a re-upload would silently
  * double every figure on it.
+ *
+ * The whole screenshot goes up as ONE request and comes back as one batch,
+ * which is what makes an import undoable. Rows used to be POSTed one at a
+ * time as ordinary manual entries: indistinguishable afterwards from things
+ * typed by hand, so there was no way to see what an upload brought in and no
+ * way to take one back — and these rows come from a vision model reading a
+ * photo, which is exactly the input worth being able to undo.
  */
 export default function ScanStatement({ available, onImported }) {
   const [file, setFile] = useState(null)
@@ -22,15 +29,22 @@ export default function ScanStatement({ available, onImported }) {
   const [busy, setBusy] = useState(false)
   const [importing, setImporting] = useState(false)
   const [error, setError] = useState('')
+  const [done, setDone] = useState(null)
+  const [history, setHistory] = useState([])
+  const [undoing, setUndoing] = useState('')
   const inputRef = useRef(null)
 
+  useEffect(() => {
+    api.imports().then(setHistory).catch(() => setHistory([]))
+  }, [])
+
   function reset() {
-    setFile(null); setRows(null); setPicked({}); setError('')
+    setFile(null); setRows(null); setPicked({}); setError(''); setDone(null)
     if (inputRef.current) inputRef.current.value = ''
   }
 
   async function scan(f) {
-    setBusy(true); setError('')
+    setBusy(true); setError(''); setDone(null)
     try {
       const { transactions } = await api.scanStatement(f)
       if (!transactions.length) {
@@ -53,33 +67,43 @@ export default function ScanStatement({ available, onImported }) {
     if (!chosen.length) return
     setImporting(true); setError('')
     try {
-      // Sequential, not parallel: these all hit the same row-writing path and
-      // the free-tier backend is single-worker.
-      for (const t of chosen) {
-        // Respect what the row actually is. Hardcoding 'expense' here booked
-        // a GPay row literally labelled "Self transfer" as ₹10,000 of
-        // spending — money moved between the owner's own accounts, counted
-        // as a purchase. A credit is already handled by direction alone
-        // (the server turns expense+credit into income).
-        const kind = t.category === 'Transfer' ? 'self' : 'expense'
-        await api.addManual({
-          amount: t.amount,
-          direction: t.direction,
-          kind,
-          // 'self' takes its category from the server (Transfer); sending one
-          // here would be ignored anyway, and Lending/Transfer are rejected
-          // by the manual-entry category picker for the same reason.
-          category: kind === 'expense' ? t.category : undefined,
-          merchant: t.merchant,
-          occurred_on: t.occurred_on || undefined,
-        })
-      }
-      reset()
-      onImported(chosen.length)
+      const result = await api.screenshotImport(chosen.map((t) => ({
+        amount: t.amount,
+        direction: t.direction,
+        // Respect what the row actually is. Sending everything as an expense
+        // booked a GPay row literally labelled "Self transfer" as ₹10,000 of
+        // spending — money moved between the owner's own accounts, counted as
+        // a purchase. The server double-checks this too.
+        kind: t.category === 'Transfer' ? 'self' : 'expense',
+        category: t.category,
+        merchant: t.merchant,
+        occurred_on: t.occurred_on || undefined,
+      })))
+      setRows(null); setPicked({}); setFile(null)
+      if (inputRef.current) inputRef.current.value = ''
+      setDone(result)
+      setHistory(await api.imports().catch(() => history))
+      onImported(result.added)
     } catch (err) {
       setError(err.message)
     } finally {
       setImporting(false)
+    }
+  }
+
+  async function undo(batch) {
+    if (!confirm('Undo this import?\n\nEvery row it added is removed. Anything logged separately is untouched.')) return
+    setUndoing(batch)
+    setError('')
+    try {
+      await api.undoImport(batch)
+      setDone(null)
+      setHistory(await api.imports().catch(() => []))
+      onImported(0)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setUndoing('')
     }
   }
 
@@ -93,6 +117,39 @@ export default function ScanStatement({ available, onImported }) {
       </section>
     )
   }
+
+  const recentImports = (
+    history.length > 0 && (
+      <section className="card">
+        <div className="card-head">
+          <h2 className="card-title">Recent imports</h2>
+          <span className="card-sub">undoable</span>
+        </div>
+        <div className="rows">
+          {history.map((b) => (
+            <div className="row" key={b.batch}>
+              <div className="row-main">
+                <div className="row-title">
+                  {b.count} row{b.count === 1 ? '' : 's'} · {moneyExact(b.total)}
+                </div>
+                <div className="row-meta">
+                  {b.at ? new Date(b.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown time'}
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={undoing === b.batch}
+                onClick={() => undo(b.batch)}
+                style={{ background: 'none', border: 0, color: 'var(--accent)', fontSize: 13, padding: '0 6px' }}
+              >
+                {undoing === b.batch ? 'Undoing…' : 'Undo'}
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+    )
+  )
 
   if (rows) {
     const chosenCount = rows.filter((_, i) => picked[i]).length
@@ -152,32 +209,55 @@ export default function ScanStatement({ available, onImported }) {
   }
 
   return (
-    <section className="card">
-      <div className="card-head">
-        <h2 className="card-title">From a screenshot</h2>
-        <span className="card-sub">a whole list at once</span>
-      </div>
-      <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-2)' }}>
-        Screenshot your GPay / PhonePe history or a bank statement. Every row is read
-        with its own date — useful because banks don&apos;t alert on everything.
-      </p>
+    <>
+      <section className="card">
+        <div className="card-head">
+          <h2 className="card-title">From a screenshot</h2>
+          <span className="card-sub">a whole list at once</span>
+        </div>
+        <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-2)' }}>
+          Screenshot your GPay / PhonePe history or a bank statement. Every row is read
+          with its own date — useful because banks don&apos;t alert on everything.
+        </p>
 
-      <label className="scan-drop">
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/*"
-          hidden
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) { setFile(f); scan(f) }
-          }}
-        />
-        <span>{busy ? 'Reading the screenshot…' : 'Tap to choose a screenshot'}</span>
-      </label>
+        {/* Shown right where the import happened, not as a toast that's gone
+            before you've read it. A screenshot is read by a vision model, so
+            "that came out wrong" is a normal outcome, not an exception. */}
+        {done && (
+          <div className="banner ok" style={{ marginBottom: 12, display: 'block' }}>
+            Imported {done.added} row{done.added === 1 ? '' : 's'} · {moneyExact(done.total)} of spending.
+            <div style={{ marginTop: 6 }}>
+              <button
+                type="button"
+                disabled={undoing === done.batch}
+                onClick={() => undo(done.batch)}
+                style={{ background: 'none', border: 0, padding: 0, color: 'inherit', fontSize: 13, textDecoration: 'underline' }}
+              >
+                {undoing === done.batch ? 'Undoing…' : 'Undo this import'}
+              </button>
+            </div>
+          </div>
+        )}
 
-      {file && busy && <div className="empty" style={{ marginTop: 10 }}>This can take up to a minute.</div>}
-      {error && <div className="banner error" style={{ marginTop: 12 }}>{error}</div>}
-    </section>
+        <label className="scan-drop">
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              if (f) { setFile(f); scan(f) }
+            }}
+          />
+          <span>{busy ? 'Reading the screenshot…' : 'Tap to choose a screenshot'}</span>
+        </label>
+
+        {file && busy && <div className="empty" style={{ marginTop: 10 }}>This can take up to a minute.</div>}
+        {error && <div className="banner error" style={{ marginTop: 12 }}>{error}</div>}
+      </section>
+
+      {recentImports}
+    </>
   )
 }

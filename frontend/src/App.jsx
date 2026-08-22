@@ -4,7 +4,6 @@ import { api, clearToken, getToken, setToken } from './api.js'
 import { clearCache, readCache, writeCache } from './cache.js'
 import { monthName } from './format.js'
 import { captureLocationOnce, getLocationConsent } from './location.js'
-import { detectRecurring } from './recurring.js'
 import AddTransaction from './components/AddTransaction.jsx'
 import Budgets from './components/Budgets.jsx'
 import Dashboard from './components/Dashboard.jsx'
@@ -51,6 +50,7 @@ export default function App() {
   const [limits, setLimits] = useState([])
   const [lending, setLending] = useState(null)
   const [recurring, setRecurring] = useState([])
+  const [capture, setCapture] = useState(null)
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
   const [wakingUp, setWakingUp] = useState(false)
@@ -83,17 +83,20 @@ export default function App() {
     // waking one. If nothing has come back after 3s, say what's happening.
     const slowTimer = setTimeout(() => setWakingUp(true), 3000)
     try {
-      const [s, tr, tx, rv, lm, ln, recentAll] = await Promise.all([
+      const [s, tr, tx, rv, lm, ln, rec, cap] = await Promise.all([
         api.summary(period.month, period.year),
         api.trend(period.month, period.year),
         api.transactions(period.month, period.year),
         api.needsReview(),
         api.budgetLimits(),
         api.lending(),
-        // No month/year filter — the last 200 transactions across however
-        // many months that spans, purely to spot a merchant repeating
-        // across months. The month-scoped `tx` above can't do that alone.
-        api.transactions(),
+        // Recurrence is worked out server-side now. It used to be derived here
+        // from an extra unfiltered fetch of the last 200 transactions — an
+        // arbitrary window that silently truncated the history the detection
+        // depends on, and a second full transaction list down the wire on
+        // every refresh purely to look for repeats.
+        api.recurring(),
+        api.captureHealth(),
       ])
       setSummary(s)
       setTrend(tr)
@@ -101,13 +104,13 @@ export default function App() {
       setReview(rv)
       setLimits(lm)
       setLending(ln)
-      const rec = detectRecurring(recentAll)
       setRecurring(rec)
+      setCapture(cap)
       // Snapshot only after everything succeeded, so a half-failed refresh
       // can never persist a partial month and show wrong totals next open.
       writeCache(period.month, period.year, {
         summary: s, trend: tr, transactions: tx, review: rv,
-        limits: lm, lending: ln, recurring: rec,
+        limits: lm, lending: ln, recurring: rec, capture: cap,
       })
     } catch (err) {
       if (err.status !== 401) setError(err.message)
@@ -134,6 +137,7 @@ export default function App() {
     setLending(cached?.lending ?? null)
     setLimits(cached?.limits ?? [])
     setRecurring(cached?.recurring ?? [])
+    setCapture(cached?.capture ?? null)
   }, [token, period.month, period.year])
 
   useEffect(() => {
@@ -299,6 +303,7 @@ export default function App() {
             <Dashboard
               summary={summary}
               trend={trend}
+              capture={capture}
               reviewCount={reviewCount}
               onGoReview={() => setTab('review')}
               onGoBudgets={() => setTab('budgets')}
@@ -309,7 +314,10 @@ export default function App() {
               onClearReminder={clearLendingReminder}
               onRepaid={markRepaid}
             />
-            <RecurringCard items={recurring} />
+            {/* Only on the current month: "due on the 5th" and "already paid"
+                are statements about now, and captioning them with a month
+                you're merely browsing would make them false. */}
+            {isCurrentMonth && <RecurringCard items={recurring} />}
           </>
         )}
 
@@ -336,8 +344,14 @@ export default function App() {
             categories={categories}
             onAdd={addManual}
             onImported={(count) => {
-              setToast(`Imported ${count} transaction${count === 1 ? '' : 's'}`)
-              setTab((current) => (current === 'add' ? 'home' : current))
+              // Deliberately stays on the Add tab. The import result carries an
+              // Undo button, and jumping to Home would take it away before it
+              // could be read — these rows come from a vision model reading a
+              // photo, so being able to take one back matters more than
+              // tidily returning home.
+              setToast(count > 0
+                ? `Imported ${count} transaction${count === 1 ? '' : 's'}`
+                : 'Import undone')
               refresh()
             }}
             onPasted={(txn) => {
@@ -372,6 +386,7 @@ export default function App() {
             limits={limits}
             spentByCategory={spentByCategory}
             onSave={saveBudget}
+            onRefresh={refresh}
             onSignOut={() => {
               // Deliberate action only — a stray tap must never log the user out.
               if (confirm("Sign out? You'll need to re-enter your access token to get back in.")) {

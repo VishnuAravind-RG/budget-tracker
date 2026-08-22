@@ -1,8 +1,9 @@
 import { money, moneyCompact, monthName } from '../format.js'
 import BudgetMeters from './BudgetMeters.jsx'
+import CaptureWarning from './CaptureWarning.jsx'
 import TrendChart from './TrendChart.jsx'
 
-export default function Dashboard({ summary, trend, reviewCount, onGoReview, onGoBudgets }) {
+export default function Dashboard({ summary, trend, capture, reviewCount, onGoReview, onGoBudgets }) {
   if (!summary) return <div className="empty">Loading…</div>
 
   const budgetLeft = summary.total_budget - summary.total_spent
@@ -21,6 +22,11 @@ export default function Dashboard({ summary, trend, reviewCount, onGoReview, onG
 
   return (
     <>
+      {/* Above everything, including the review queue. If capture has stopped,
+          every figure below is describing less than it should — that is worth
+          knowing before reading any of them. */}
+      <CaptureWarning capture={capture} />
+
       {reviewCount > 0 && (
         <button className="banner error" onClick={onGoReview} style={{ width: '100%', border: 0, textAlign: 'left' }}>
           {reviewCount} transaction{reviewCount > 1 ? 's need' : ' needs'} a category →

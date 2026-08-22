@@ -74,6 +74,18 @@ function ReviewItem({ t, categories, onClassify }) {
         ))}
       </div>
 
+      {/* Answering "a person" for a shop is the expensive mistake: it files
+          the payment as money lent out rather than spending, puts the shop in
+          the who-owes-you list, and — because a remembered answer is never
+          asked about again — keeps doing so silently forever. A bakery spent
+          weeks in there. The hint says WHY it looks like a business, so it can
+          be checked against what you actually know, not just obeyed. */}
+      {choice === 'friend' && t.business_hint && (
+        <div className="banner" style={{ marginTop: 10 }}>
+          This looks like a shop, not a person — {t.business_hint}. Sure?
+        </div>
+      )}
+
       {choice && (
         <div className="who-detail">
           {choice === 'friend' && (

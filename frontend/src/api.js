@@ -117,6 +117,11 @@ export const api = {
     form.append('image', file)
     return request('/ai/scan-statement', { method: 'POST', body: form })
   },
+  // Is automatic capture still alive? Bank alerts simply stopping produces no
+  // error anywhere — the totals just quietly stop growing.
+  captureHealth: () => request('/stats/capture-health'),
+  // Monthly repeats, each marked paid / due / overdue for the current month.
+  recurring: () => request('/stats/recurring'),
   // Day/week/month review, each with the comparison against the period before.
   statsSummary: (period) => request(`/stats/summary${qs({ period })}`),
   summary: (month, year) => request(`/budget/summary${qs({ month, year })}`),
@@ -139,8 +144,20 @@ export const api = {
   deleteTodo: (id) => request(`/todos/${id}`, { method: 'DELETE' }),
   clearCompletedTodos: () => request('/todos/clear-completed', { method: 'POST' }),
 
+  // ---- screenshot imports ----
+  // One request for the whole screenshot, not one per row: the backend is
+  // single-worker, and a failure halfway through a loop left half a screenshot
+  // imported with no record of which half.
+  screenshotImport: (rows) => request('/transactions/screenshot-import', { method: 'POST', body: { rows } }),
+  imports: () => request('/imports'),
+  undoImport: (batch) => request(`/imports/${encodeURIComponent(batch)}`, { method: 'DELETE' }),
+
   // ---- memory ----
   payees: () => request('/payees'),
+  // Correct a wrong answer. `apply_to_past` also re-files the transactions it
+  // already decided — forgetting alone leaves those mis-filed forever.
+  updatePayee: (key, payload) =>
+    request(`/payees/${encodeURIComponent(key)}`, { method: 'PATCH', body: payload }),
   forgetPayee: (key) => request(`/payees/${encodeURIComponent(key)}`, { method: 'DELETE' }),
 
   // ---- lending ----

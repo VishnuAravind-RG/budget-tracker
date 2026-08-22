@@ -72,6 +72,16 @@ inspector_cols = {c["name"] for c in db.inspect(db.engine).get_columns("transact
 check("kind column added", "kind" in inspector_cols)
 check("payee_key column added", "payee_key" in inspector_cols)
 check("counterparty column added", "counterparty" in inspector_cols)
+check("bank_ref column added", "bank_ref" in inspector_cols)
+check("ingested_at column added", "ingested_at" in inspector_cols)
+check("import_batch column added", "import_batch" in inspector_cols)
+
+with db.engine.connect() as conn:
+    batches = conn.execute(db.text("SELECT import_batch FROM transactions")).fetchall()
+# No backfill, deliberately: a row written before screenshot imports existed
+# genuinely belongs to no batch, and inventing one would make it undoable as
+# part of an import that never happened.
+check("import_batch is null for pre-existing rows", all(b[0] is None for b in batches), batches)
 
 with db.engine.connect() as conn:
     rows = conn.execute(db.text("SELECT id, merchant, amount, kind, payee_key, counterparty FROM transactions ORDER BY id")).fetchall()
