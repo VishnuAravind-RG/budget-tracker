@@ -1,9 +1,11 @@
 import asyncio
 import os
+import re
 import secrets
 import time
 import urllib.request
 from contextlib import asynccontextmanager
+from datetime import date as date_cls
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -508,6 +510,87 @@ async def scan_receipt_endpoint(
     return result
 
 
+MERCHANT_STOPWORDS_FOR_MATCH = {
+    "the", "and", "pvt", "ltd", "limited", "private", "india", "co", "company",
+    "services", "service", "store", "shop", "payments", "payment", "online",
+}
+
+
+def _match_key(name: str) -> set[str]:
+    """Distinctive lowercase word-ish tokens from a merchant name.
+
+    The same payment is named differently by every source — GPay says
+    "Republic Petroleum Station and Co" where the bank alert says
+    "paytm-30139373@ptys" — so exact name matching is useless. Shared
+    distinctive tokens are what actually survive between them.
+    """
+    cleaned = re.sub(r"[^a-z0-9 ]", " ", (name or "").lower())
+    return {
+        w for w in cleaned.split()
+        if len(w) >= 4 and w not in MERCHANT_STOPWORDS_FOR_MATCH and not w.isdigit()
+    }
+
+
+def _flag_duplicates(rows: list[dict], db: Session) -> None:
+    """Mark each scanned row that looks like something already recorded, or
+    like a repeat of an earlier row in the SAME screenshot.
+
+    Deliberately errs towards flagging. An unticked row the user re-ticks
+    costs one tap; a silently double-counted payment corrupts every total it
+    touches and is very hard to notice later. Three ways a row gets flagged:
+
+    1. It repeats an earlier row in this same scan. Reading one line twice is
+       a real failure mode of the vision model, and it happened: a screenshot
+       produced two identical "Amazon Pay Gift Card Rs 232" rows when only one
+       such payment existed.
+    2. Same amount on the same day as an existing transaction — any
+       direction. Restricting this to debits previously let an already-stored
+       credit through unflagged.
+    3. Same amount within a day either side, AND a shared distinctive word in
+       the merchant name. Sources disagree about dates near midnight and about
+       names, so neither alone is enough, but together they are convincing.
+    """
+    existing = db.query(Transaction).all()
+    by_amount: dict[float, list] = {}
+    for t in existing:
+        by_amount.setdefault(round(t.amount, 2), []).append(
+            (local_day_key(t.created_at), _match_key(t.merchant or ""))
+        )
+
+    seen_in_scan: dict[tuple, int] = {}
+    for index, row in enumerate(rows):
+        amount = round(row["amount"], 2)
+        date = row.get("occurred_on")
+        tokens = _match_key(row.get("merchant") or "")
+        reason = None
+
+        scan_key = (amount, date, tuple(sorted(tokens)))
+        if scan_key in seen_in_scan:
+            reason = "appears twice in this screenshot"
+        else:
+            seen_in_scan[scan_key] = index
+            for stored_day, stored_tokens in by_amount.get(amount, []):
+                if date and stored_day == date:
+                    reason = "already recorded"
+                    break
+                if date and tokens and (tokens & stored_tokens) and _within_a_day(date, stored_day):
+                    reason = f"already recorded on {stored_day}"
+                    break
+
+        row["already_recorded"] = reason is not None
+        row["duplicate_reason"] = reason
+
+
+def _within_a_day(a: str, b: str) -> bool:
+    """True when two YYYY-MM-DD strings are at most one day apart."""
+    try:
+        da = date_cls.fromisoformat(a)
+        db_ = date_cls.fromisoformat(b)
+    except ValueError:
+        return False
+    return abs((da - db_).days) <= 1
+
+
 @api.post("/ai/scan-statement")
 async def scan_statement_endpoint(
     image: UploadFile = File(...),
@@ -547,19 +630,7 @@ async def scan_statement_endpoint(
     if not rows:
         return {"transactions": []}
 
-    # Flag rows that already exist. Matched on amount + local day, which is
-    # what a person comparing the two lists would use — the merchant string
-    # differs between GPay and the bank's own alert for the same payment
-    # ("Republic Petroleum Station and Co" vs "paytm-30139373@ptys"), so
-    # matching on the name would miss almost every genuine duplicate.
-    existing = db.query(Transaction).filter(Transaction.direction == "debit").all()
-    seen = {(round(t.amount, 2), local_day_key(t.created_at)) for t in existing}
-    for row in rows:
-        row["already_recorded"] = (
-            row["occurred_on"] is not None
-            and (round(row["amount"], 2), row["occurred_on"]) in seen
-        )
-
+    _flag_duplicates(rows, db)
     return {"transactions": rows}
 
 

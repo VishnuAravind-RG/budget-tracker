@@ -595,6 +595,67 @@ check("a second copy carrying the same reference is reported as duplicate",
       _b["status"] == "duplicate", _b)
 client.delete(f"/transactions/{_a['transaction']['id']}", headers=AUTH)
 
+# --- screenshot duplicate detection -------------------------------------------
+# A screenshot re-uploaded, or a vision model reading one line twice, must not
+# be able to double-count. Equally, over-eager matching would silently DROP
+# real spending, so the "must not flag" cases matter just as much.
+from main import _flag_duplicates as _flag
+from db import SessionLocal as _SL
+from models import Transaction as _T
+from timeutil import local_date_to_utc as _ldu
+
+_d = _SL()
+_seed = [
+    _T(merchant="Swiggy", amount=76, direction="debit", category="Food & Dining",
+       source="manual", kind="expense", created_at=_ldu(2026, 8, 22)),
+    _T(merchant="Amazon Pay Gift Card", amount=232, direction="debit", category="Shopping",
+       source="manual", kind="expense", created_at=_ldu(2026, 8, 21)),
+    _T(merchant="Self transfer", amount=10000, direction="credit", category="Transfer",
+       source="manual", kind="transfer", created_at=_ldu(2026, 8, 21)),
+]
+for _r in _seed: _d.add(_r)
+_d.commit()
+
+_rows = [
+    {"merchant": "Swiggy", "amount": 76.0, "occurred_on": "2026-08-22", "direction": "debit", "category": "Food & Dining"},
+    {"merchant": "Amazon Pay Gift Card", "amount": 232.0, "occurred_on": "2026-08-21", "direction": "debit", "category": "Shopping"},
+    {"merchant": "Amazon Pay Gift Card", "amount": 232.0, "occurred_on": "2026-08-21", "direction": "debit", "category": "Shopping"},
+    {"merchant": "Self transfer", "amount": 10000.0, "occurred_on": "2026-08-21", "direction": "debit", "category": "Transfer"},
+    {"merchant": "METROPOLITAN TRANSPORT CORPORATION", "amount": 19.0, "occurred_on": "2026-08-22", "direction": "debit", "category": "Transport"},
+    {"merchant": "Swiggy", "amount": 512.0, "occurred_on": "2026-08-22", "direction": "debit", "category": "Food & Dining"},
+]
+_flag(_rows, _d)
+check("an already-recorded row is flagged", _rows[0]["already_recorded"] is True, _rows[0])
+check("the second identical row in one screenshot is flagged",
+      _rows[2]["already_recorded"] and "twice in this screenshot" in (_rows[2]["duplicate_reason"] or ""),
+      _rows[2])
+check("a CREDIT already stored is flagged too (was debit-only before)",
+      _rows[3]["already_recorded"] is True, _rows[3])
+check("a genuinely new row is NOT flagged", _rows[4]["already_recorded"] is False, _rows[4])
+check("same merchant, different amount is NOT flagged", _rows[5]["already_recorded"] is False, _rows[5])
+check("a reason is given for every flagged row",
+      all(r["duplicate_reason"] for r in _rows if r["already_recorded"]), _rows)
+
+# Sources disagree about dates near midnight, so a day either side counts —
+# but only when the merchant name shares a distinctive word.
+_near = [
+    {"merchant": "Swiggy Limited", "amount": 76.0, "occurred_on": "2026-08-23", "direction": "debit", "category": "Food & Dining"},
+    {"merchant": "Totally Different Shop", "amount": 76.0, "occurred_on": "2026-08-23", "direction": "debit", "category": "Other"},
+]
+_flag(_near, _d)
+check("same amount a day apart WITH a matching name is flagged", _near[0]["already_recorded"] is True, _near[0])
+check("same amount a day apart with an unrelated name is NOT flagged",
+      _near[1]["already_recorded"] is False, _near[1])
+
+# A row with no readable date can't be matched on date; it must not be
+# flagged purely because some old row happens to share the amount.
+_nodate = [{"merchant": "Mystery", "amount": 76.0, "occurred_on": None, "direction": "debit", "category": "Other"}]
+_flag(_nodate, _d)
+check("a row with no date is left for the user to judge", _nodate[0]["already_recorded"] is False, _nodate[0])
+
+for _r in _seed: _d.delete(_r)
+_d.commit(); _d.close()
+
 # --- timezone boundaries -------------------------------------------------------
 # Timestamps are stored as naive UTC but months and days are cut in local
 # time (IST, +5:30). A spend just before local midnight is over five hours

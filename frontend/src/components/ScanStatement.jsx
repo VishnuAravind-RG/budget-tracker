@@ -98,8 +98,9 @@ export default function ScanStatement({ available, onImported }) {
           </button>
         </div>
         <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--text-2)' }}>
-          Already-recorded rows are unticked so nothing gets counted twice. Check the
-          amounts before importing.
+          Rows that look like duplicates are unticked so nothing gets counted twice —
+          the reason is shown against each. Tick one back on if it really is a separate
+          payment.
         </p>
 
         <div className="rows">
@@ -116,7 +117,12 @@ export default function ScanStatement({ available, onImported }) {
                 <div className="row-meta">
                   <span className="chip">{t.category}</span>
                   {t.occurred_on ? ` ${t.occurred_on}` : ' no date — will use today'}
-                  {t.already_recorded && ' · already recorded'}
+                  {/* Say WHY, not just that it's flagged — "appears twice in
+                      this screenshot" and "already recorded" call for
+                      different judgement from the reader. */}
+                  {t.duplicate_reason && (
+                    <span style={{ color: 'var(--warn)' }}> · {t.duplicate_reason}</span>
+                  )}
                 </div>
               </div>
               <div className="row-amount">{moneyExact(t.amount)}</div>
