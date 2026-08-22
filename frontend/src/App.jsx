@@ -16,14 +16,22 @@ import Todos from './components/Todos.jsx'
 import Summary from './components/Summary.jsx'
 import LendingCard from './components/LendingCard.jsx'
 import RecurringCard from './components/RecurringCard.jsx'
-import { ChartIcon, FuelIcon, HomeIcon, ListIcon, PlusIcon, ReviewIcon, TargetIcon, TodoIcon } from './components/Icons.jsx'
+import { ChartIcon, FuelIcon, HomeIcon, ListIcon, PlusIcon, TargetIcon, TodoIcon } from './components/Icons.jsx'
 
+// Review has no tab of its own: now that obvious businesses classify
+// themselves, the queue is empty almost all the time, and a permanent tab for
+// a usually-empty screen is wasted space in a bar that has to scroll.
+//
+// The screen itself still exists and is reached from the dashboard banner,
+// which only appears when something genuinely needs answering. Losing the
+// screen entirely would be a correctness problem, not a cosmetic one — it's
+// the only place to say "this was a friend, not a shop", and without that
+// money lent out silently counts as spending.
 const TABS = [
   { id: 'home', label: 'Home', Icon: HomeIcon },
-  { id: 'review', label: 'Review', Icon: ReviewIcon },
+  { id: 'summary', label: 'Summary', Icon: ChartIcon },
   { id: 'add', label: 'Add', Icon: PlusIcon },
   { id: 'history', label: 'History', Icon: ListIcon },
-  { id: 'summary', label: 'Summary', Icon: ChartIcon },
   { id: 'fuel', label: 'Fuel', Icon: FuelIcon },
   { id: 'todos', label: 'To-do', Icon: TodoIcon },
   { id: 'budgets', label: 'Budgets', Icon: TargetIcon },
@@ -299,8 +307,22 @@ export default function App() {
           </>
         )}
 
+        {/* Reached from the dashboard banner, not the tab bar. It therefore
+            carries its own way out — otherwise answering the last item leaves
+            you on an empty screen with no tab highlighted and no obvious
+            route back. */}
         {tab === 'review' && (
-          <Review items={review} categories={categories} onClassify={classify} />
+          <>
+            <button
+              type="button"
+              className="banner"
+              onClick={() => setTab('home')}
+              style={{ width: '100%', border: 0, textAlign: 'left', cursor: 'pointer' }}
+            >
+              ← Back to Home
+            </button>
+            <Review items={review} categories={categories} onClassify={classify} />
+          </>
         )}
 
         {tab === 'add' && (
@@ -367,7 +389,10 @@ export default function App() {
           >
             <Icon />
             {label}
-            {id === 'review' && reviewCount > 0 && <span className="tab-badge">{reviewCount}</span>}
+            {/* The pending count rides on Home now that Review has no tab —
+                otherwise nothing in the bar would ever hint that something
+                needs answering. */}
+            {id === 'home' && reviewCount > 0 && <span className="tab-badge">{reviewCount}</span>}
           </button>
         ))}
       </nav>
