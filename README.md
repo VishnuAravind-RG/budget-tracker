@@ -275,6 +275,17 @@ Every route except `/health` needs `Authorization: Bearer <AUTH_TOKEN>`.
 | `GET` | `/budget/limits` | Current limits |
 | `POST` | `/budget/set` | `{category, monthly_limit}` — 0 clears it |
 | `GET` | `/stats/daily?month=&year=` | Per-day totals for the trend chart |
+| `GET` | `/stats/capture-health` | Has automatic capture gone quiet? |
+| `GET` | `/stats/recurring` | Monthly repeats, each paid / due / overdue |
+| `GET` | `/stats/summary?period=day\|week\|month` | Period review with a comparison |
+| `POST` | `/ai/scan-statement` | Screenshot of a transaction list -> rows (books nothing) |
+| `POST` | `/transactions/screenshot-import` | `{rows: [...]}` — books a screenshot as one batch |
+| `GET` | `/imports` | Recent screenshot imports |
+| `DELETE` | `/imports/{batch}` | Undo one import, and only its own rows |
+| `GET` | `/payees` | Every remembered "who is this?" answer |
+| `PATCH` | `/payees/{key}` | Correct one; `apply_to_past` re-files what it decided |
+| `DELETE` | `/payees/{key}` | Forget one (future transactions ask again) |
+| `GET` | `/export/all` | The whole database as JSON, for backups |
 | `GET` | `/categories` | The category list |
 
 Interactive docs at `https://<your-app>.up.railway.app/docs`.
@@ -288,6 +299,39 @@ Interactive docs at `https://<your-app>.up.railway.app/docs`.
 | `ok` | Stored |
 | `ignored` | OTP / promo / reminder — deliberately not stored |
 | `duplicate` | Identical SMS within 120s; returns the existing row |
+
+---
+
+## Backups
+
+`.github/workflows/backup.yml` snapshots the database nightly (02:00 IST) and
+stores it as an encrypted workflow artifact, kept 90 days.
+
+**The encryption is not optional.** This repository is public, and workflow
+artifacts on a public repo can be downloaded by anyone who can see the run — an
+unencrypted artifact would publish every amount, merchant, and person lent to.
+The workflow checks for the passphrase *before* it fetches anything, so a
+missing secret can never leave plaintext sitting on the runner, and it fails
+rather than falling back to storing something readable.
+
+Two repository secrets are required, under
+**Settings → Secrets and variables → Actions**:
+
+| Secret | What |
+|---|---|
+| `APP_AUTH_TOKEN` | The same bearer token the app signs in with |
+| `BACKUP_PASSPHRASE` | Any long random string — **keep a copy somewhere other than GitHub** |
+
+A backup you cannot decrypt is not a backup. To restore:
+
+```bash
+openssl enc -d -aes-256-cbc -pbkdf2 -in backup.json.enc -out backup.json
+```
+
+`/export/all` deliberately omits the `gmail_auth` table: it holds a Google
+OAuth refresh token, which is a credential rather than data. Re-connecting
+Gmail after a restore is one visit to `/gmail/auth/start`; leaking a token that
+never expires is not undoable.
 
 ---
 

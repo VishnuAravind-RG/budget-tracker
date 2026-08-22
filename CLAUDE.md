@@ -470,7 +470,7 @@ changes), then fetched the live bundle from Vercel and confirmed its byte
 size matched the local build exactly, plus grepped for new-feature strings
 (`"Log a fill-up"`, `"Money lent out"`) to confirm it wasn't a stale cache.
 
-**As of 2026-08-22 (end of session):** `smoke_test.py` is at **300 checks**, `test_migration.py` at 22, both passing.
+**As of 2026-08-22 (end of session):** `smoke_test.py` is at **317 checks**, `test_migration.py` at 22, both passing. Browser suites total **103 checks** across seven files, all green against real production: `suite` (22), `enhance_flow` (31, the six enhancements), `shot_flow` (11, a real screenshot scanned, imported and undone), `review_flow` (11), `deep` (10), `fuel_flow` (10), `auth_offline` (8).
 There is also a browser suite (22 checks, Playwright, driven against real
 production) covering every tab rendering *real content* rather than a
 spinner, the Review and Add lend-vs-settle questions, the fuel trip/odo
@@ -490,6 +490,21 @@ Two habits that paid off and are worth keeping:
   touching either.** Both happened this session: the `(UPI Ref 402913)` case
   was a real bug in new code, while `remembered names are readable` was an
   assertion too absolute for a message that genuinely carries no name.
+
+### Two traps that cost real time on 2026-08-22
+
+- **Playwright route interception silently stops working once the service
+  worker takes control.** This is a PWA; from the second page load onwards
+  `sw.js` proxies every API call itself, so `page.route()` never sees them and
+  the app quietly gets the real endpoint instead of the stub. It looks exactly
+  like a broken component. Pass `serviceWorkers: 'block'` to `newContext()` in
+  any suite that intercepts. (The worker itself is network-first, so this is
+  not a staleness bug in the app.)
+- **A bundle hash that doesn't match your local build does not mean the deploy
+  is stale.** CI injects `VITE_API_URL`; a local build without it differs by
+  exactly that string and hashes differently. Byte-compare the served bundle
+  against the local one and look at where they diverge before concluding
+  anything.
 
 ## Open questions for the owner — not this session's call to make
 
