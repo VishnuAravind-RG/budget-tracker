@@ -1383,6 +1383,26 @@ check("a timeout is NOT retried", _timeouts["calls"] == 1, _timeouts)
 receipt_scan.urllib.request.urlopen = _original_urlopen
 
 
+# --- the lending list is ordered the same way every time -------------------------
+# Python's sort is stable, so equal balances kept whatever order the database
+# happened to return rows in - which is undefined, and genuinely differs between
+# engines: a restored SQLite copy of the production data listed two settled
+# friends in the opposite order to Postgres. On screen that is a card that
+# reshuffles between refreshes for no visible reason.
+for _who, _amt in (("Zara", 100), ("Aditya", 100), ("Meera", 900)):
+    client.post("/transactions/manual",
+                json={"amount": _amt, "direction": "debit", "kind": "friend", "merchant": _who},
+                headers=AUTH)
+_order = [p["person"] for p in client.get("/lending", headers=AUTH).json()]
+_probe = [p for p in _order if p in ("Zara", "Aditya", "Meera")]
+check("the biggest debt is listed first", _probe[0] == "Meera", _probe)
+check("equal balances fall back to name order, not database order",
+      _probe[1:] == ["Aditya", "Zara"], _probe)
+for _t in client.get("/transactions", headers=AUTH).json():
+    if _t["merchant"] in ("Zara", "Aditya", "Meera"):
+        client.delete(f"/transactions/{_t['id']}", headers=AUTH)
+
+
 # --- report ---------------------------------------------------------------------
 # Must stay the LAST thing in this file. It used to sit in the middle, so the
 # checks below it printed PASS/FAIL but could not fail the run — a broken one

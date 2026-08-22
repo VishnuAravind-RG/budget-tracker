@@ -2061,7 +2061,13 @@ def lending_balances(db: Session = Depends(get_db)):
             "outstanding": outstanding,
             "next_reminder_at": (reminder.next_reminder_at.isoformat() + "Z") if reminder else None,
         })
-    return sorted(out, key=lambda x: -x["outstanding"])
+    # Name is the tiebreak, not an afterthought: Python's sort is stable, so
+    # without it people with equal balances keep whatever order the database
+    # happened to return rows in. That is undefined, and it genuinely differs —
+    # a restored SQLite copy of this exact data listed two settled friends in
+    # the opposite order to Postgres. On screen it means the card can reshuffle
+    # between refreshes for no reason the reader can see.
+    return sorted(out, key=lambda x: (-x["outstanding"], x["person"].lower()))
 
 
 @api.post("/lending/{person}/snooze")
