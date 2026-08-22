@@ -322,11 +322,26 @@ Two repository secrets are required, under
 | `APP_AUTH_TOKEN` | The same bearer token the app signs in with |
 | `BACKUP_PASSPHRASE` | Any long random string — **keep a copy somewhere other than GitHub** |
 
-A backup you cannot decrypt is not a backup. To restore:
+A backup you cannot decrypt is not a backup, and one nobody has restored is a
+guess. To restore:
 
 ```bash
 openssl enc -d -aes-256-cbc -pbkdf2 -in backup.json.enc -out backup.json
+
+# Look before you leap - reports what would happen, writes nothing:
+python backend/restore_backup.py backup.json --into "sqlite:///C:/temp/check.db" --dry-run
+
+# Then for real. --replace is required if the target already holds data.
+python backend/restore_backup.py backup.json --into "$DATABASE_URL" --replace
 ```
+
+`restore_backup.py` refuses to restore on top of existing transactions without
+`--replace` (it would double every figure), refuses a backup carrying no
+transactions, and checks the file's stated row counts against what it actually
+contains so a truncated download is caught rather than half-restored.
+
+**Worth doing once now, not when you need it.** Restore into a throwaway SQLite
+file and confirm the numbers match what the app shows.
 
 `/export/all` deliberately omits the `gmail_auth` table: it holds a Google
 OAuth refresh token, which is a credential rather than data. Re-connecting

@@ -20,7 +20,9 @@ name: Nightly encrypted backup
 #
 # To restore, download the artifact and:
 #   openssl enc -d -aes-256-cbc -pbkdf2 -in backup.json.enc -out backup.json
-# then feed backup.json back through the API (or straight into Postgres).
+#   python backend/restore_backup.py backup.json --into "<DATABASE_URL>" --replace
+# Run it with --dry-run first. See backend/restore_backup.py, which has been
+# tested end to end against a real snapshot rather than assumed to work.
 
 on:
   schedule:
