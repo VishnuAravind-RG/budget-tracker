@@ -164,7 +164,14 @@ export default function RememberedPayees({ categories, onChanged }) {
 
   async function reload(result) {
     if (result?.updated) {
-      setNote(`Re-filed ${result.updated} transaction${result.updated === 1 ? '' : 's'}.`)
+      const parts = [`Re-filed ${result.updated} transaction${result.updated === 1 ? '' : 's'}`]
+      // Worth saying out loud rather than doing quietly: a "repaid in cash"
+      // row for a debt that turned out never to have existed is a real
+      // transaction disappearing from the history.
+      if (result.removed) {
+        parts.push(`removed ${result.removed} settlement${result.removed === 1 ? '' : 's'} for a debt that never existed`)
+      }
+      setNote(`${parts.join(', ')}.`)
     }
     setPayees(await api.payees().catch(() => payees))
     // Totals may have moved — the dashboard is showing the old ones.

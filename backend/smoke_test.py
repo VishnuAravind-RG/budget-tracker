@@ -1069,6 +1069,49 @@ check("money wrongly counted as lending becomes spending again",
       round(spent_after_fix - spent_before_fix, 2) == 67.0,
       {"before": spent_before_fix, "after": spent_after_fix})
 
+# Settling a debt that never existed leaves a marker behind. This is the exact
+# shape found in production: a bakery answered as "a person", the resulting
+# "loan" cleared with the cash-repaid button, and a repayment row left
+# recording money returned for a debt that was never lent.
+client.post("/sms/ingest", json={"text":
+    "Rs.150.00 debited from a/c XXXX1234 on 15-08-26 to VPA vyapar.99887766@hdfcbank (CORNER BAKERY) Ref 810000041"
+}, headers=AUTH)
+_bakery2 = client.get("/transactions/needs-review", headers=AUTH).json()[0]
+client.patch(f"/transactions/{_bakery2['id']}/classify",
+             json={"kind": "friend", "label": "CORNER BAKERY"}, headers=AUTH)
+client.post("/lending/CORNER BAKERY/repaid", headers=AUTH)
+_settled = [t for t in client.get("/transactions", headers=AUTH).json()
+            if t["counterparty"] == "CORNER BAKERY" and t["kind"] == "repayment"]
+check("marking a fictional loan repaid writes a settlement row", len(_settled) == 1, _settled)
+
+# A genuine repayment that arrived as a bank credit must survive the same
+# correction untouched - it has alert text behind it and really happened.
+client.post("/sms/ingest", json={"text":
+    "Rs.400.00 credited to your a/c XX1234 on 16-08-26 b. Sender: REAL FRIEND (VPA: realfriend@ybl) Ref 810000042"
+}, headers=AUTH)
+_credit = client.get("/transactions/needs-review", headers=AUTH).json()[0]
+client.patch(f"/transactions/{_credit['id']}/classify",
+             json={"kind": "friend", "label": "REAL FRIEND"}, headers=AUTH)
+
+_fix2 = client.patch("/payees/vyapar.99887766@hdfcbank",
+                     json={"kind": "expense", "category": "Food & Dining", "apply_to_past": True},
+                     headers=AUTH).json()
+check("correcting the answer clears the settlement for a debt that never existed",
+      _fix2["removed"] == 1, _fix2)
+_left = [t for t in client.get("/transactions", headers=AUTH).json()
+         if t["counterparty"] == "CORNER BAKERY"]
+check("...leaving no phantom repayment behind", _left == [], _left)
+_real = [t for t in client.get("/transactions", headers=AUTH).json()
+         if t["counterparty"] == "REAL FRIEND"]
+check("a real repayment backed by a bank alert is untouched", len(_real) == 1, _real)
+check("correcting a shop to another shop removes nothing",
+      client.patch("/payees/vyapar.99887766@hdfcbank",
+                   json={"kind": "expense", "category": "Groceries", "apply_to_past": True},
+                   headers=AUTH).json()["removed"] == 0)
+for _t in client.get("/transactions", headers=AUTH).json():
+    if _t["merchant"] in ("CORNER BAKERY", "REAL FRIEND"):
+        client.delete(f"/transactions/{_t['id']}", headers=AUTH)
+
 # Correcting without apply_to_past must change nothing historical - moving old
 # totals is a choice, not a side effect.
 before_noapply = client.get("/budget/summary", headers=AUTH).json()["total_spent"]

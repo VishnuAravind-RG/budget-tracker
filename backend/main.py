@@ -1639,6 +1639,11 @@ def update_payee(key: str, payload: PayeeUpdate, db: Session = Depends(get_db)):
     if not payee:
         raise HTTPException(404, "Not remembered")
 
+    # Captured before the row is mutated below — what the answer USED to be
+    # decides whether there are lending artefacts to clean up.
+    payee_was = payee.kind
+    payee_label_before = payee.label
+
     label = (payload.label or payee.label).strip() or payee.label
     payee.label = label
     payee.kind = payload.kind
@@ -1647,6 +1652,8 @@ def update_payee(key: str, payload: PayeeUpdate, db: Session = Depends(get_db)):
     payee.default_category = payload.category if payload.kind == "expense" else None
 
     updated = 0
+    removed = 0
+    was_person = payee_was in ("friend", "friend_settle")
     if payload.apply_to_past:
         rows = db.query(Transaction).filter(Transaction.payee_key == key).all()
         for txn in rows:
@@ -1664,6 +1671,37 @@ def update_payee(key: str, payload: PayeeUpdate, db: Session = Depends(get_db)):
             if payload.kind == "expense" and txn.category == "Uncategorized":
                 txn.needs_review = True
             updated += 1
+
+        # Settling a debt that never existed leaves a marker behind.
+        #
+        # /lending/{person}/repaid writes a real `repayment` row to record
+        # money handed back in cash, because the app cannot see that any other
+        # way. When the "person" turns out to be a bakery, the loan it settled
+        # was never a loan — so that row is recording the repayment of a debt
+        # that did not exist, and nothing else in the app would ever question
+        # it. Re-filing it is not an option: a credit re-resolved as an
+        # ordinary transaction becomes *income*, which is worse than leaving
+        # it. It has to go.
+        #
+        # Identified precisely, never by guesswork: a cash-settlement marker is
+        # manual, has no alert text behind it, and names the counterparty. A
+        # genuine repayment that arrived as a bank credit has `raw_text` and
+        # source "sms", and is left completely alone.
+        if was_person and payload.kind not in ("friend", "friend_settle"):
+            names = {payee_label_before, label} | {r.counterparty for r in rows if r.counterparty}
+            markers = (
+                db.query(Transaction)
+                .filter(
+                    Transaction.kind == "repayment",
+                    Transaction.source == "manual",
+                    Transaction.raw_text.is_(None),
+                    Transaction.counterparty.in_([n for n in names if n]),
+                )
+                .all()
+            )
+            for marker in markers:
+                db.delete(marker)
+                removed += 1
 
         # A person who turns out to be a shop has no debt to be nudged about.
         # Left behind, the reminder keeps firing about money that was never
@@ -1691,6 +1729,8 @@ def update_payee(key: str, payload: PayeeUpdate, db: Session = Depends(get_db)):
             ),
         }),
         "updated": updated,
+        # Cash-settlement markers for a debt that turned out never to exist.
+        "removed": removed,
     }
 
 
