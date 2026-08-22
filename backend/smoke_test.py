@@ -1185,6 +1185,32 @@ check(f"something not yet paid reads as '{_expected_status}' on day {_today.day}
 check("...counting the days from today",
       rec.get("MAID SALARY", {}).get("days_until") == 5 - _today.day, rec.get("MAID SALARY"))
 check("a one-off purchase is not called recurring", "ONE OFF SHOP" not in rec, list(rec))
+
+# Two months is the bar, and the current month counts towards it. Requiring
+# two months BEFORE this one was the first cut, and it needed three months of
+# history before anything appeared at all - against the two real months in
+# production it returned an empty list, the feature silently doing nothing.
+_ly, _lm = _month_back(1)
+_last_month_only = client.post("/transactions/manual", json={
+    "amount": 7500, "direction": "debit", "category": "Health",
+    "merchant": "KG FITNESS", "occurred_on": f"{_ly:04d}-{_lm:02d}-08"}, headers=AUTH).json()
+_this_month_too = client.post("/transactions/manual", json={
+    "amount": 7500, "direction": "debit", "category": "Health",
+    "merchant": "KG FITNESS"}, headers=AUTH).json()
+rec2 = {r["merchant"]: r for r in client.get("/stats/recurring", headers=AUTH).json()}
+check("one previous month plus this one is enough to count as recurring",
+      "KG FITNESS" in rec2, list(rec2))
+check("...and it reads as paid", rec2.get("KG FITNESS", {}).get("status") == "paid", rec2.get("KG FITNESS"))
+# This month's own sighting must not inform the date it is judged against -
+# that is circular. The expected day comes from last month's payment (the 8th),
+# not from today.
+check("the expected day ignores this month's own payment",
+      rec2.get("KG FITNESS", {}).get("typical_day") == 8, rec2.get("KG FITNESS"))
+client.delete(f"/transactions/{_this_month_too['id']}", headers=AUTH)
+rec3 = {r["merchant"]: r for r in client.get("/stats/recurring", headers=AUTH).json()}
+check("with this month's payment removed it stops counting as recurring",
+      "KG FITNESS" not in rec3, list(rec3))
+client.delete(f"/transactions/{_last_month_only['id']}", headers=AUTH)
 _statuses = [r["status"] for r in client.get("/stats/recurring", headers=AUTH).json()]
 check("overdue items sort to the front",
       _statuses == sorted(_statuses, key=lambda st: {"overdue": 0, "due": 1, "paid": 2}[st]), _statuses)

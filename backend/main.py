@@ -928,6 +928,7 @@ def recurring_expectations(
         .all()
     )
 
+    this_month = f"{now.year:04d}-{now.month:02d}"
     groups: dict[tuple[str, str], dict] = {}
     for txn in rows:
         name = (txn.merchant or "").strip()
@@ -941,29 +942,36 @@ def recurring_expectations(
         })
         entry["months"].add(day_key[:7])
         entry["amounts"].append(float(txn.amount))
-        # Rows bulk-loaded from a spreadsheet only ever knew a month, so they
-        # are anchored to the 1st (see /transactions/import). They are real
-        # evidence that the month happened, but their "day" is an artefact —
-        # counting it would drag every expected date towards the 1st.
-        if txn.source != "import":
+        # Two exclusions from the "which day does this usually land on"
+        # sample, for different reasons:
+        #
+        # - Rows bulk-loaded from a spreadsheet only ever knew a month, so
+        #   they are anchored to the 1st (see /transactions/import). Real
+        #   evidence the month happened, but their "day" is an artefact, and
+        #   counting it would drag every expected date towards the 1st.
+        # - This month's own sighting, because the expected date is what
+        #   this month is being judged against. Letting a payment already
+        #   made inform its own due date is circular.
+        if txn.source != "import" and day_key[:7] != this_month:
             entry["days"].append(int(day_key[-2:]))
         entry["label"] = name if day_key >= entry["last_seen"] else entry["label"]
         entry["last_seen"] = max(entry["last_seen"], day_key)
 
-    this_month = f"{now.year:04d}-{now.month:02d}"
     today = now.day
     out = []
 
     for entry in groups.values():
+        # Two distinct months is the bar, the current one included. Requiring
+        # two months BEFORE this one was the first cut and it was wrong: it
+        # needs three months of history before anything appears at all, and
+        # against two real months of data it returned an empty list — the
+        # feature silently doing nothing. Something seen in July and again in
+        # August is a monthly payment; the circularity worth avoiding is only
+        # in the expected *date*, and that is handled where the sample is
+        # built above.
         if len(entry["months"]) < 2:
             continue
         paid = this_month in entry["months"]
-        # Months other than the current one — the current one is what's being
-        # predicted, so including a part-finished month would let a payment
-        # already made this month inform its own expected date.
-        past_months = len(entry["months"]) - (1 if paid else 0)
-        if past_months < 2:
-            continue
 
         typical_day = int(round(_median(entry["days"]))) if entry["days"] else None
         if paid:
