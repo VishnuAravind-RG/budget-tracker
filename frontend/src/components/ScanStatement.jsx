@@ -56,11 +56,20 @@ export default function ScanStatement({ available, onImported }) {
       // Sequential, not parallel: these all hit the same row-writing path and
       // the free-tier backend is single-worker.
       for (const t of chosen) {
+        // Respect what the row actually is. Hardcoding 'expense' here booked
+        // a GPay row literally labelled "Self transfer" as ₹10,000 of
+        // spending — money moved between the owner's own accounts, counted
+        // as a purchase. A credit is already handled by direction alone
+        // (the server turns expense+credit into income).
+        const kind = t.category === 'Transfer' ? 'self' : 'expense'
         await api.addManual({
           amount: t.amount,
           direction: t.direction,
-          kind: 'expense',
-          category: t.category,
+          kind,
+          // 'self' takes its category from the server (Transfer); sending one
+          // here would be ignored anyway, and Lending/Transfer are rejected
+          // by the manual-entry category picker for the same reason.
+          category: kind === 'expense' ? t.category : undefined,
           merchant: t.merchant,
           occurred_on: t.occurred_on || undefined,
         })
