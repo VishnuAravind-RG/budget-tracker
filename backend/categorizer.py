@@ -37,6 +37,14 @@ _GEMINI_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{_g
 # pieces, not just a key: the resource endpoint and the deployment name
 # (the name given to the model when it was deployed in Azure, not
 # necessarily matching the underlying model's own name).
+# Set once the endpoint rejects our credentials — which is exactly what an
+# expired subscription, or a key rotated in the portal but not updated on the
+# server, looks like from here. Without it every unknown merchant pays a full
+# round trip to an endpoint certain to refuse it before falling through to
+# Gemini, so classification quietly gets slower the day a deadline passes,
+# with nothing on screen to say why.
+_azure_disabled = False
+
 _azure_key = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
 _azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
 _azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "").strip()
@@ -90,6 +98,40 @@ OBVIOUS_MERCHANTS = {
     "zerodha": "Investment", "groww": "Investment", "upstox": "Investment",
     "kuvera": "Investment", "coin": "Investment", "sip": "Investment",
 }
+
+# Generic trade words, as opposed to the brand names above.
+#
+# The real spending here is overwhelmingly small local businesses — "MOHANDAS
+# JUICE SHOP", "Ss Hyderabad Biriyani Peravallur", "KP SEASON FRUITS". No brand
+# list will ever contain those, but they nearly all say what they are in their
+# own name, and reading that costs nothing and works offline.
+#
+# This is worth more than it looks: it is the difference between an AI call and
+# no AI call at all, on free quotas that have to last.
+#
+# Kept deliberately narrow. Every word here has to be one that essentially only
+# appears in a business of that kind — "bakery" yes, "star" no. A wrong entry
+# mis-files spending silently and forever, because unlike an AI guess a rule
+# match is treated as confident by design and never reaches the review queue.
+#
+# No salon/parlour/barber rule on purpose: this app has no Personal Care
+# category, and filing them as "Other" would mark them confident and skip the
+# review that is the only chance to record what they actually were.
+OBVIOUS_MERCHANTS.update({
+    "bakery": "Food & Dining", "bakers": "Food & Dining", "biriyani": "Food & Dining",
+    "biryani": "Food & Dining", "juice": "Food & Dining", "coffee": "Food & Dining",
+    "tea stall": "Food & Dining", "restaurant": "Food & Dining", "dine in": "Food & Dining",
+    "sweets": "Food & Dining", "tiffin": "Food & Dining", "canteen": "Food & Dining",
+    "chaat": "Food & Dining", "dhaba": "Food & Dining", "hotel": "Food & Dining",
+    "cafe": "Food & Dining", "snacks": "Food & Dining",
+    "fruits": "Groceries", "supermarket": "Groceries", "super market": "Groceries",
+    "provision": "Groceries", "kirana": "Groceries", "vegetables": "Groceries",
+    "parking": "Transport", "service station": "Transport", "filling station": "Transport",
+    "travels": "Transport", "toll plaza": "Transport",
+    "pharmacy": "Health", "medicals": "Health", "clinic": "Health", "hospital": "Health",
+    "diagnostics": "Health", "dental": "Health",
+    "stationery": "Shopping", "hardware": "Shopping", "electricals": "Shopping",
+})
 
 # Junk SMS that mention money but aren't transactions.
 NON_TRANSACTIONAL = re.compile(
@@ -484,11 +526,20 @@ def business_hint(label: str, key: str | None) -> str | None:
 
 
 def _rule_match(merchant: str, raw_text: str) -> str | None:
+    """Longest matching keyword wins, so a specific name beats a generic word.
+
+    First-match-by-dict-order was the previous behaviour, which made the answer
+    depend on where a key happened to sit in the literal above. Harmless while
+    every key was a distinct brand; actively wrong once generic trade words
+    like "coffee" and "hotel" sit alongside them, because then two keys really
+    can both match one name and the more specific one has to win.
+    """
     haystack = f"{merchant} {raw_text}".lower()
+    best_key = best_category = None
     for key, category in OBVIOUS_MERCHANTS.items():
-        if key in haystack:
-            return category
-    return None
+        if key in haystack and (best_key is None or len(key) > len(best_key)):
+            best_key, best_category = key, category
+    return best_category
 
 
 def _gemini_categorize(merchant: str, raw_text: str) -> dict | None:
@@ -556,7 +607,8 @@ def _azure_categorize(merchant: str, raw_text: str) -> dict | None:
     categorize() below. Returns None on any failure, same contract as
     _gemini_categorize(), for the same reason: never allowed to break
     ingestion, this is strictly a nice-to-have."""
-    if not (_azure_key and _azure_endpoint and _azure_deployment):
+    global _azure_disabled
+    if _azure_disabled or not (_azure_key and _azure_endpoint and _azure_deployment):
         return None
 
     body = {
@@ -578,7 +630,10 @@ def _azure_categorize(merchant: str, raw_text: str) -> dict | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # 30s was too patient for a provider with a free alternative sitting
+        # behind it: every second here is added to a request someone is
+        # waiting on, for an answer Gemini can give instead.
+        with urllib.request.urlopen(req, timeout=12) as resp:
             data = json.loads(resp.read().decode())
         parsed = json.loads(data["choices"][0]["message"]["content"])
         category = parsed.get("category", "Other")
@@ -590,6 +645,13 @@ def _azure_categorize(merchant: str, raw_text: str) -> dict | None:
             "confident": bool(parsed.get("confident", False)),
             "entity": entity if entity in ENTITY_KINDS else "unclear",
         }
+    except urllib.error.HTTPError as e:
+        # 401/403 means the credential is wrong and will stay wrong until a
+        # person changes it — stop paying a round trip per merchant to be told
+        # so. A 429 or a 5xx is temporary and must NOT disable the provider.
+        if e.code in (401, 403):
+            _azure_disabled = True
+        return None
     except Exception:
         return None
 

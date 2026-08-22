@@ -106,11 +106,22 @@ check("OTP ignored", r["status"] == "ignored", r)
 r = client.post("/sms/ingest", json={"text": "Congratulations! You are pre-approved for a loan of Rs 5,00,000. Apply now!"}, headers=AUTH).json()
 check("promo ignored", r["status"] == "ignored", r)
 
-r = client.post("/sms/ingest", json={"text": "INR 1,250.50 spent on HDFC Card x1234 at MADHURA SWEETS on 2026-08-15"}, headers=AUTH).json()
+# "MADHURA SWEETS" used to be the example of an unknown merchant here, and
+# stopped being one when "sweets" was added to the offline rules — a sweet shop
+# now classifies for free, which is the point of that change. This needs a name
+# that genuinely says nothing about what was bought, which is the real shape of
+# an unclassifiable merchant.
+r = client.post("/sms/ingest", json={"text": "INR 1,250.50 spent on HDFC Card x1234 at KRS ENTERPRISES on 2026-08-15"}, headers=AUTH).json()
 check("unknown merchant -> needs review", r["transaction"]["needs_review"] is True, r["transaction"])
-check("merchant extracted", r["transaction"]["merchant"] == "MADHURA SWEETS", r["transaction"])
+check("merchant extracted", r["transaction"]["merchant"] == "KRS ENTERPRISES", r["transaction"])
 check("comma amount parsed", r["transaction"]["amount"] == 1250.50, r["transaction"])
 review_id = r["transaction"]["id"]
+
+# The one it replaced now takes the free path instead of an API call.
+_sweet = client.post("/sms/ingest", json={"text": "INR 260.00 spent on HDFC Card x1234 at MADHURA SWEETS on 2026-08-16"}, headers=AUTH).json()["transaction"]
+check("a sweet shop classifies offline, with no API call",
+      _sweet["category"] == "Food & Dining" and _sweet["needs_review"] is False, _sweet)
+client.delete(f"/transactions/{_sweet['id']}", headers=AUTH)
 
 r = client.post("/sms/ingest", json={"text": "Rs 45000 credited to A/c XX1234 by salary transfer from ACME CORP"}, headers=AUTH).json()
 check("credit direction detected", r["transaction"]["direction"] == "credit", r["transaction"])
@@ -1082,14 +1093,14 @@ check("money wrongly counted as lending becomes spending again",
 # "loan" cleared with the cash-repaid button, and a repayment row left
 # recording money returned for a debt that was never lent.
 client.post("/sms/ingest", json={"text":
-    "Rs.150.00 debited from a/c XXXX1234 on 15-08-26 to VPA vyapar.99887766@hdfcbank (CORNER BAKERY) Ref 810000041"
+    "Rs.150.00 debited from a/c XXXX1234 on 15-08-26 to VPA vyapar.99887766@hdfcbank (CORNER TRADERS) Ref 810000041"
 }, headers=AUTH)
 _bakery2 = client.get("/transactions/needs-review", headers=AUTH).json()[0]
 client.patch(f"/transactions/{_bakery2['id']}/classify",
-             json={"kind": "friend", "label": "CORNER BAKERY"}, headers=AUTH)
-client.post("/lending/CORNER BAKERY/repaid", headers=AUTH)
+             json={"kind": "friend", "label": "CORNER TRADERS"}, headers=AUTH)
+client.post("/lending/CORNER TRADERS/repaid", headers=AUTH)
 _settled = [t for t in client.get("/transactions", headers=AUTH).json()
-            if t["counterparty"] == "CORNER BAKERY" and t["kind"] == "repayment"]
+            if t["counterparty"] == "CORNER TRADERS" and t["kind"] == "repayment"]
 check("marking a fictional loan repaid writes a settlement row", len(_settled) == 1, _settled)
 
 # A genuine repayment that arrived as a bank credit must survive the same
@@ -1107,7 +1118,7 @@ _fix2 = client.patch("/payees/vyapar.99887766@hdfcbank",
 check("correcting the answer clears the settlement for a debt that never existed",
       _fix2["removed"] == 1, _fix2)
 _left = [t for t in client.get("/transactions", headers=AUTH).json()
-         if t["counterparty"] == "CORNER BAKERY"]
+         if t["counterparty"] == "CORNER TRADERS"]
 check("...leaving no phantom repayment behind", _left == [], _left)
 _real = [t for t in client.get("/transactions", headers=AUTH).json()
          if t["counterparty"] == "REAL FRIEND"]
@@ -1117,7 +1128,7 @@ check("correcting a shop to another shop removes nothing",
                    json={"kind": "expense", "category": "Groceries", "apply_to_past": True},
                    headers=AUTH).json()["removed"] == 0)
 for _t in client.get("/transactions", headers=AUTH).json():
-    if _t["merchant"] in ("CORNER BAKERY", "REAL FRIEND"):
+    if _t["merchant"] in ("CORNER TRADERS", "REAL FRIEND"):
         client.delete(f"/transactions/{_t['id']}", headers=AUTH)
 
 # Correcting without apply_to_past must change nothing historical - moving old
@@ -1401,6 +1412,105 @@ check("equal balances fall back to name order, not database order",
 for _t in client.get("/transactions", headers=AUTH).json():
     if _t["merchant"] in ("Zara", "Aditya", "Meera"):
         client.delete(f"/transactions/{_t['id']}", headers=AUTH)
+
+
+# --- the offline path, which is what survives an expired API key ------------------
+# Real spending here is overwhelmingly small local businesses that no brand list
+# will ever contain - but they say what they are in their own name. Matching
+# that costs nothing, works offline, and is the difference between needing an AI
+# call and not. Measured against the real merchant history, this took the share
+# handled with no API call at all from 19 of 54 counterparties to 28.
+from categorizer import CATEGORIES as _CATS  # noqa: E402
+from categorizer import OBVIOUS_MERCHANTS, _rule_match  # noqa: E402
+
+for _name, _expected in [
+    ("MOHANDAS JUICE SHOP", "Food & Dining"),
+    ("Ss Hyderabad Biriyani Peravallur", "Food & Dining"),
+    ("MANAM COFFEE CO", "Food & Dining"),
+    ("Ajantha Backers-PNS", None),          # "backers", not "bakers" - not a match
+    ("GEETHAM DINE IN 1", "Food & Dining"),
+    ("FRESH SUPERMARKET PERAMBUR C1", "Groceries"),
+    ("Spectrum mall parking", "Transport"),
+    ("Lans Service Station", "Transport"),
+    ("MEDPLUS PHARMACY", "Health"),
+    ("HARI HARAN AGENCIES 3", None),        # says nothing about what it sells
+    ("R MANOHARAN", None),                  # a person's name must never rule-match
+    ("VARSHA RS", None),
+]:
+    check(f"offline rule reads {_name[:28]!r}", _rule_match(_name, "") == _expected,
+          f"got {_rule_match(_name, '')!r}, expected {_expected!r}")
+
+# A rule match is treated as confident and never reaches the review queue, so a
+# rule pointing at a category that doesn't exist would file spending into a
+# bucket no screen can show.
+_bad = [(k, v) for k, v in OBVIOUS_MERCHANTS.items() if v not in _CATS]
+check("every offline rule maps to a real category", not _bad, _bad)
+
+# Longest match wins, so a specific name beats a generic word. With
+# first-match-by-dict-order the answer depended on where a key happened to sit
+# in the literal, which stopped being harmless the moment generic trade words
+# joined the brand names.
+OBVIOUS_MERCHANTS["zzz test generic"] = "Other"
+OBVIOUS_MERCHANTS["zzz test generic specific"] = "Health"
+check("the longer, more specific keyword wins",
+      _rule_match("ZZZ TEST GENERIC SPECIFIC LTD", "") == "Health",
+      _rule_match("ZZZ TEST GENERIC SPECIFIC LTD", ""))
+check("...and the generic one still matches on its own",
+      _rule_match("ZZZ TEST GENERIC LTD", "") == "Other")
+del OBVIOUS_MERCHANTS["zzz test generic"], OBVIOUS_MERCHANTS["zzz test generic specific"]
+
+# --- an expired Azure subscription must not tax every transaction ----------------
+# The key behind this is on a subscription that expires. When it does, every
+# unknown merchant would pay a full round trip to an endpoint certain to refuse
+# it before falling through to Gemini - classification quietly getting slower
+# the day a deadline passes, with nothing on screen to say why.
+import categorizer as _cat  # noqa: E402
+
+_cat._azure_key = "expired-key"
+_cat._azure_endpoint = "https://example.invalid"
+_cat._azure_deployment = "gpt-5-mini-1"
+
+
+def _azure_calls_counting(code):
+    state = {"calls": 0}
+
+    def fake(_req, timeout=None):
+        state["calls"] += 1
+        raise urllib.error.HTTPError("https://x", code, "nope", {}, io.BytesIO(b"{}"))
+
+    return fake, state
+
+
+_saved_urlopen = _cat.urllib.request.urlopen
+
+_cat._azure_disabled = False
+fake, state = _azure_calls_counting(401)
+_cat.urllib.request.urlopen = fake
+for _ in range(5):
+    _cat._azure_categorize("SOME SHOP", "")
+check("an expired Azure key is tried once, not once per transaction",
+      state["calls"] == 1, state)
+check("...and the provider marks itself disabled", _cat._azure_disabled is True)
+
+# A rate limit or a server blip is temporary. Disabling the provider for the
+# life of the process over one of those would throw away the good key.
+_cat._azure_disabled = False
+fake, state = _azure_calls_counting(429)
+_cat.urllib.request.urlopen = fake
+for _ in range(3):
+    _cat._azure_categorize("SOME SHOP", "")
+check("a rate limit does NOT disable Azure", state["calls"] == 3 and _cat._azure_disabled is False, state)
+
+_cat._azure_disabled = False
+fake, state = _azure_calls_counting(500)
+_cat.urllib.request.urlopen = fake
+for _ in range(3):
+    _cat._azure_categorize("SOME SHOP", "")
+check("a server error does NOT disable Azure", state["calls"] == 3 and _cat._azure_disabled is False, state)
+
+_cat.urllib.request.urlopen = _saved_urlopen
+_cat._azure_key = _cat._azure_endpoint = _cat._azure_deployment = ""
+_cat._azure_disabled = False
 
 
 # --- report ---------------------------------------------------------------------
