@@ -13,10 +13,49 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 
 from categorizer import CATEGORIES
+
+# Google's own words for a 503 here: "This model is currently experiencing high
+# demand. Spikes in demand are usually temporary. Please try again later." That
+# is explicitly retryable, and it happened mid-test on a request that had
+# succeeded seconds earlier. Surfacing it as a hard failure means re-picking
+# the file and waiting through the whole scan again — for something that
+# normally clears in a second or two. This is a daily habit, not a one-off.
+#
+# Retried only on codes that mean "not now": 429 (rate limited), 500/502/503
+# (transient server-side). Never on 400 (bad request) or 403 (bad key), which
+# will fail identically forever and where retrying just wastes the user's time.
+_RETRYABLE_STATUS = {429, 500, 502, 503}
+_RETRY_DELAYS = (1.5, 4.0)  # two extra attempts, ~5.5s of waiting at worst
+
+
+def _post_with_retry(req, timeout: int):
+    """POST, retrying only the failures that mean "try again shortly".
+
+    Returns the decoded JSON body. Raises the final HTTPError/URLError so the
+    callers' existing handlers produce their own, more specific messages.
+    """
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        last_attempt = attempt == len(_RETRY_DELAYS)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            # HTTPError before URLError: it subclasses URLError, so the order
+            # of these two blocks is what decides which one sees a 503.
+            if last_attempt or e.code not in _RETRYABLE_STATUS:
+                raise
+        except urllib.error.URLError as e:
+            # A connection dropped on the way out deserves the same treatment.
+            # A timeout does not: it already waited the full budget, and
+            # spending it again turns a slow scan into a very slow one.
+            if last_attempt or isinstance(getattr(e, "reason", None), TimeoutError):
+                raise
+        time.sleep(_RETRY_DELAYS[attempt])
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 _api_key = os.getenv("GEMINI_API_KEY", "").strip()
@@ -90,8 +129,7 @@ def scan_receipt(image_bytes: bytes, mime_type: str, note: str | None = None) ->
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
+        data = _post_with_retry(req, timeout=30)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:300]
         raise ReceiptScanError(f"Gemini request failed ({e.code}): {detail}") from e
@@ -203,8 +241,7 @@ def scan_statement(image_bytes: bytes, mime_type: str, reference_year: int) -> l
     try:
         # Longer than scan_receipt's: a list of a dozen rows is a much bigger
         # generation than a single receipt's five fields.
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read().decode())
+        data = _post_with_retry(req, timeout=90)
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:300]
         raise ReceiptScanError(f"Gemini request failed ({e.code}): {detail}") from e

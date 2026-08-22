@@ -1285,6 +1285,104 @@ check("no OAuth refresh token anywhere in the export",
 check("export needs auth", client.get("/export/all").status_code == 401)
 
 
+# --- Gemini's "try again shortly" is retried, its "never" is not ------------------
+# Google's own 503 body says: "This model is currently experiencing high demand.
+# Spikes in demand are usually temporary. Please try again later." That hit a
+# real screenshot upload seconds after an identical one succeeded. Surfacing it
+# as a hard failure means re-picking the file and sitting through the whole scan
+# again - for something that normally clears in a second.
+import io  # noqa: E402
+import urllib.error  # noqa: E402
+
+import receipt_scan  # noqa: E402
+
+receipt_scan._RETRY_DELAYS = (0.0, 0.0)  # no real waiting inside the test
+
+
+class _FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("https://x", code, "boom", {}, io.BytesIO(b"{}"))
+
+
+def _urlopen_failing(times, code, then=b'{"ok": true}'):
+    """Fails `times` times with `code`, then succeeds. Counts its own calls."""
+    state = {"calls": 0}
+
+    def fake(_req, timeout=None):
+        state["calls"] += 1
+        if state["calls"] <= times:
+            raise _http_error(code)
+        return _FakeResponse(then)
+
+    return fake, state
+
+
+_original_urlopen = receipt_scan.urllib.request.urlopen
+
+fake, state = _urlopen_failing(1, 503)
+receipt_scan.urllib.request.urlopen = fake
+check("a 503 from Gemini is retried rather than surfaced",
+      receipt_scan._post_with_retry(object(), 5) == {"ok": True} and state["calls"] == 2, state)
+
+fake, state = _urlopen_failing(2, 429)
+receipt_scan.urllib.request.urlopen = fake
+check("a rate limit is retried too", receipt_scan._post_with_retry(object(), 5) == {"ok": True}, state)
+
+# Three attempts total, not an unbounded loop - the user is waiting.
+fake, state = _urlopen_failing(99, 503)
+receipt_scan.urllib.request.urlopen = fake
+try:
+    receipt_scan._post_with_retry(object(), 5)
+    check("persistent failure eventually gives up", False, "no error raised")
+except urllib.error.HTTPError:
+    check("persistent failure eventually gives up", True)
+check("...after exactly three attempts, not more", state["calls"] == 3, state)
+
+# A bad request or a bad key fails identically forever; retrying only wastes
+# the user's time and Google's quota.
+fake, state = _urlopen_failing(99, 400)
+receipt_scan.urllib.request.urlopen = fake
+try:
+    receipt_scan._post_with_retry(object(), 5)
+except urllib.error.HTTPError:
+    pass
+check("a 400 is NOT retried", state["calls"] == 1, state)
+
+fake, state = _urlopen_failing(99, 403)
+receipt_scan.urllib.request.urlopen = fake
+try:
+    receipt_scan._post_with_retry(object(), 5)
+except urllib.error.HTTPError:
+    pass
+check("a bad API key is NOT retried", state["calls"] == 1, state)
+
+# A timeout already waited the full budget; spending it again turns a slow scan
+# into a very slow one.
+_timeouts = {"calls": 0}
+
+
+def _always_timeout(_req, timeout=None):
+    _timeouts["calls"] += 1
+    raise urllib.error.URLError(TimeoutError("timed out"))
+
+
+receipt_scan.urllib.request.urlopen = _always_timeout
+try:
+    receipt_scan._post_with_retry(object(), 5)
+except urllib.error.URLError:
+    pass
+check("a timeout is NOT retried", _timeouts["calls"] == 1, _timeouts)
+
+receipt_scan.urllib.request.urlopen = _original_urlopen
+
+
 # --- report ---------------------------------------------------------------------
 # Must stay the LAST thing in this file. It used to sit in the middle, so the
 # checks below it printed PASS/FAIL but could not fail the run — a broken one
