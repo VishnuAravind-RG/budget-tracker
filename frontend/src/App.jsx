@@ -192,6 +192,12 @@ export default function App() {
   async function classify(id, payload) {
     await api.classifyTransaction(id, payload)
     setToast('Saved & remembered')
+    // Answering the LAST item used to leave you sitting on "Nothing to
+    // review" with no tab highlighted — Review has no tab to step away by,
+    // and the banner that brought you here is gone the moment the queue
+    // empties. Finishing the queue should return you where you came from.
+    const wasLast = (review?.length ?? 0) <= 1
+    if (wasLast) setTab((current) => (current === 'review' ? 'home' : current))
     refresh()
   }
 
