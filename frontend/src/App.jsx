@@ -110,7 +110,13 @@ export default function App() {
       // can never persist a partial month and show wrong totals next open.
       writeCache(period.month, period.year, {
         summary: s, trend: tr, transactions: tx, review: rv,
-        limits: lm, lending: ln, recurring: rec, capture: cap,
+        limits: lm, lending: ln, recurring: rec,
+        // `capture` is deliberately NOT cached. It is a live status, not a
+        // description of the month: a snapshot saying "nothing has arrived in
+        // two days" is only true at the moment it was taken, and painting it
+        // from storage put a stale outage warning at the top of the dashboard
+        // on every open until the refresh landed — raising an alarm about a
+        // problem that may have been fixed days ago.
       })
     } catch (err) {
       if (err.status !== 401) setError(err.message)
@@ -137,7 +143,10 @@ export default function App() {
     setLending(cached?.lending ?? null)
     setLimits(cached?.limits ?? [])
     setRecurring(cached?.recurring ?? [])
-    setCapture(cached?.capture ?? null)
+    // Never restored from cache — see writeCache above. Null means "we have
+    // not heard yet", which renders nothing at all, and that is the honest
+    // state until a fresh answer arrives.
+    setCapture(null)
   }, [token, period.month, period.year])
 
   useEffect(() => {
