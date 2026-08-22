@@ -1721,12 +1721,22 @@ def update_payee(key: str, payload: PayeeUpdate, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(payee)
+    # used_by is computed, not stored, so it has to be filled in here too.
+    # Left out, this response said "decided 0 transactions" for a payee the
+    # list endpoint reported as deciding one — the same fact, two answers,
+    # depending on which call the screen happened to read.
+    used_by = (
+        db.query(func.count(Transaction.id))
+        .filter(Transaction.payee_key == key)
+        .scalar()
+    ) or 0
     return {
         "payee": PayeeOut.model_validate(payee).model_copy(update={
             "business_hint": (
                 business_hint(payee.label, payee.key)
                 if payee.kind in ("friend", "friend_settle") else None
             ),
+            "used_by": int(used_by),
         }),
         "updated": updated,
         # Cash-settlement markers for a debt that turned out never to exist.

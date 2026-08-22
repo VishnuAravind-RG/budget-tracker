@@ -1058,6 +1058,14 @@ check("correcting a payee re-files the transactions it already decided", fix["up
 check("the corrected answer is no longer flagged", fix["payee"]["business_hint"] is None, fix)
 check("a corrected shop keeps its category as the remembered default",
       fix["payee"]["default_category"] == "Food & Dining", fix)
+# used_by is computed rather than stored, so it has to be filled in on this
+# response too — left out, the same fact had two answers depending on which
+# call the screen happened to read.
+check("the correction response agrees with the list about how much it decided",
+      fix["payee"]["used_by"] ==
+      next(p["used_by"] for p in client.get("/payees", headers=AUTH).json()
+           if p["key"] == "vyapar.175693560002@hdfcbank"),
+      fix["payee"])
 
 lent_after = client.get("/lending", headers=AUTH).json()
 check("the shop is gone from the lending list",
