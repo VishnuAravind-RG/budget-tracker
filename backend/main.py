@@ -520,18 +520,30 @@ def screenshot_import(payload: ScreenshotImport, db: Session = Depends(get_db)):
     for row in payload.rows:
         label = row.merchant or ("Someone" if row.kind in ("friend", "friend_settle") else "Transaction")
 
-        # Backstop for the client sending a self-transfer as an ordinary
-        # expense. It did exactly that once and booked a GPay row literally
-        # labelled "Self transfer" as Rs 10,000 of spending — money moved
-        # between the owner's own accounts, counted as a purchase, inflating
-        # the month by a fifth. The client is fixed too; this makes the same
-        # mistake unrepeatable from any caller.
         kind_choice = row.kind
-        if kind_choice == "expense" and row.category == "Transfer":
-            kind_choice = "self"
+        needs_review = False
+        row_category = row.category
+
+        # "Transfer" and "Lending" are reserved: Review.jsx's category picker
+        # deliberately excludes both (see AddExpense.jsx/Review.jsx), and
+        # _resolve_kind() only ever assigns them itself for a genuine
+        # self-transfer or an explicit "a person" answer. A vision model
+        # choosing either for a plain expense row is not evidence of
+        # anything — it happened purely from a name that merely looked
+        # transfer-shaped, and trusting it silently removed real spending
+        # from every total. Only actual self-transfer LANGUAGE in the
+        # merchant text is trusted; everything else goes to Review instead
+        # of being guessed either way, same protection an unknown SMS
+        # counterparty already gets.
+        if kind_choice == "expense" and row.category in ("Transfer", "Lending"):
+            if row.category == "Transfer" and _looks_like_self_transfer(label):
+                kind_choice = "self"
+            else:
+                needs_review = True
+                row_category = "Uncategorized"
 
         kind, category, counterparty = _resolve_kind(
-            kind_choice, row.direction, label, row.category, row.category or "Uncategorized"
+            kind_choice, row.direction, label, row_category, row_category or "Uncategorized"
         )
 
         occurred_at = None
@@ -550,7 +562,7 @@ def screenshot_import(payload: ScreenshotImport, db: Session = Depends(get_db)):
             direction=row.direction,
             category=category,
             source="screenshot",
-            needs_review=False,
+            needs_review=needs_review,
             kind=kind,
             counterparty=counterparty,
             import_batch=batch,
@@ -699,6 +711,23 @@ def _match_key(name: str) -> set[str]:
     }
 
 
+# "Transfer" only means what it says when the merchant TEXT says so — not
+# just because the vision model picked it for an ambiguous row. It has picked
+# "Transfer" for a plain person's name before ("S Sadashiva", Rs 120), and
+# because screenshot_import() used to trust that category as automatic proof
+# of a self-transfer, real spending vanished from every total with no human
+# check at all — worse than a wrong category, since a wrong category is at
+# least still counted as spending. See screenshot_import() below.
+_SELF_TRANSFER_RE = re.compile(
+    r"\bself[\s-]?transfer\b|\bown\s+account\b|\bmy\s+other\b|\bmy\s+\w+\s+account\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_self_transfer(text: str) -> bool:
+    return bool(_SELF_TRANSFER_RE.search(text or ""))
+
+
 def _flag_duplicates(rows: list[dict], db: Session) -> None:
     """Mark each scanned row that looks like something already recorded, or
     like a repeat of an earlier row in the SAME screenshot.
@@ -725,10 +754,21 @@ def _flag_duplicates(rows: list[dict], db: Session) -> None:
             (local_day_key(t.created_at), _match_key(t.merchant or ""))
         )
 
+    # A row the vision model couldn't read a date for used to skip duplicate
+    # checking ENTIRELY — both branches below required `date` to be truthy,
+    # so a row with no date could never match anything, no matter the amount
+    # or merchant. That is exactly backwards: an undated row is booked under
+    # TODAY if it's imported (see screenshot_import()'s fallback when
+    # occurred_on is empty), so comparing it as anything else was the bug.
+    # Confirmed live: a screenshot read 4 of 5 rows' dates correctly and
+    # missed one — that one row skipped every check and was re-added as new
+    # money the next day, an exact repeat of a payment already recorded.
+    today = local_day_key(utc_now_naive())
+
     seen_in_scan: dict[tuple, int] = {}
     for index, row in enumerate(rows):
         amount = round(row["amount"], 2)
-        date = row.get("occurred_on")
+        date = row.get("occurred_on") or today
         tokens = _match_key(row.get("merchant") or "")
         reason = None
 
@@ -738,10 +778,10 @@ def _flag_duplicates(rows: list[dict], db: Session) -> None:
         else:
             seen_in_scan[scan_key] = index
             for stored_day, stored_tokens in by_amount.get(amount, []):
-                if date and stored_day == date:
+                if stored_day == date:
                     reason = "already recorded"
                     break
-                if date and tokens and (tokens & stored_tokens) and _within_a_day(date, stored_day):
+                if tokens and (tokens & stored_tokens) and _within_a_day(date, stored_day):
                     reason = f"already recorded on {stored_day}"
                     break
 

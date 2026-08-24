@@ -1513,6 +1513,109 @@ _cat._azure_key = _cat._azure_endpoint = _cat._azure_deployment = ""
 _cat._azure_disabled = False
 
 
+# --- undated screenshot rows must not skip duplicate detection -------------------
+# A row the vision model couldn't read a date for used to skip duplicate
+# checking entirely: both branches of the comparison required a truthy date,
+# so no date meant no check, no matter how obviously it matched something
+# already stored. Confirmed live: a screenshot read 4 of 5 rows correctly and
+# missed the date on one, and that one went straight back in as new money the
+# next day - an exact repeat of "POP STIX PERIYAR NAGAR" Rs 63.
+# "Yesterday" relative to whatever day the test actually runs on, not a
+# hardcoded date - the stored row and the undated row must land within the
+# app's own real ±1-day window, exactly like the live case that found this.
+from datetime import timedelta as _shot_td  # noqa: E402
+
+_shot_today = main.local_now().date()
+_shot_yesterday = (_shot_today - _shot_td(days=1)).isoformat()
+already = client.post("/transactions/manual", json={
+    "amount": 63, "direction": "debit", "category": "Food & Dining",
+    "merchant": "POP STIX PERIYAR NAGAR", "occurred_on": _shot_yesterday,
+}, headers=AUTH).json()
+
+_undated_rows = [
+    {"occurred_on": "", "merchant": "POP STIX PERIYAR NAGAR", "amount": 63.0,
+     "direction": "debit", "category": "Food & Dining"},
+]
+# Call it exactly as the endpoint does — through a real session.
+_db = SessionLocal()
+try:
+    main._flag_duplicates(_undated_rows, _db)
+finally:
+    _db.close()
+check("a row with no date is still checked against what's already stored",
+      _undated_rows[0]["already_recorded"] is True, _undated_rows[0])
+check("...and says why", _undated_rows[0]["duplicate_reason"] is not None, _undated_rows[0])
+
+# An undated row that genuinely is new money must NOT be flagged just for
+# lacking a date — only a real match should trip this.
+_new_rows = [
+    {"occurred_on": "", "merchant": "SOME BRAND NEW SHOP", "amount": 9999.0,
+     "direction": "debit", "category": "Shopping"},
+]
+_db = SessionLocal()
+try:
+    main._flag_duplicates(_new_rows, _db)
+finally:
+    _db.close()
+check("an undated row with nothing matching it is NOT flagged",
+      _new_rows[0]["already_recorded"] is False, _new_rows[0])
+
+client.delete(f"/transactions/{already['id']}", headers=AUTH)
+
+# --- a "Transfer" guess from the vision model is not proof of a self-transfer ----
+# The model has picked "Transfer" for a plain person's name before ("S
+# Sadashiva", Rs 120), and screenshot_import() used to trust that category
+# alone as proof of a self-transfer — removing real spending from every total
+# with no human check at all. Only actual self-transfer LANGUAGE in the
+# merchant text is trusted now; everything else goes to Review instead.
+spent_before_shot = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+ambiguous = client.post("/transactions/screenshot-import", json={"rows": [
+    {"amount": 120, "direction": "debit", "category": "Transfer",
+     "merchant": "S Sadashiva", "occurred_on": "2026-08-23"},
+]}, headers=AUTH).json()
+_ambig_row = next(t for t in client.get("/transactions", headers=AUTH).json()
+                   if t["id"] and t.get("import_batch") == ambiguous["batch"])
+check("an ambiguous 'Transfer' guess is NOT trusted as a self-transfer",
+      _ambig_row["kind"] == "expense", _ambig_row)
+check("...it is queued for review instead of guessed either way",
+      _ambig_row["needs_review"] is True, _ambig_row)
+check("...and does not keep the meaningless 'Transfer' category",
+      _ambig_row["category"] == "Uncategorized", _ambig_row)
+spent_after_shot = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+check("...so the money is still counted as spending while it waits to be answered",
+      round(spent_after_shot - spent_before_shot, 2) == 120.0,
+      {"before": spent_before_shot, "after": spent_after_shot})
+
+# A genuine self-transfer must still work exactly as before — no regression.
+genuine = client.post("/transactions/screenshot-import", json={"rows": [
+    {"amount": 5000, "direction": "debit", "category": "Transfer",
+     "merchant": "Self transfer (to my other account)", "occurred_on": "2026-08-23"},
+]}, headers=AUTH).json()
+_genuine_row = next(t for t in client.get("/transactions", headers=AUTH).json()
+                     if t.get("import_batch") == genuine["batch"])
+check("real self-transfer language IS still trusted",
+      _genuine_row["kind"] == "transfer" and _genuine_row["needs_review"] is False, _genuine_row)
+spent_after_genuine = client.get("/budget/summary", headers=AUTH).json()["total_spent"]
+check("...and a real self-transfer is still excluded from spending",
+      spent_after_genuine == spent_after_shot, {"after_shot": spent_after_shot, "after_genuine": spent_after_genuine})
+
+# "Lending" gets the same protection — no path currently books a screenshot
+# row as a real loan, so a bare "Lending" guess is exactly as untrustworthy as
+# "Transfer" and must not silently misfile a category no ordinary answer uses.
+lending_guess = client.post("/transactions/screenshot-import", json={"rows": [
+    {"amount": 75, "direction": "debit", "category": "Lending",
+     "merchant": "R Karthikeyan", "occurred_on": "2026-08-23"},
+]}, headers=AUTH).json()
+_lend_row = next(t for t in client.get("/transactions", headers=AUTH).json()
+                  if t.get("import_batch") == lending_guess["batch"])
+check("a bare 'Lending' guess also gets routed to review, not trusted",
+      _lend_row["kind"] == "expense" and _lend_row["needs_review"] is True and _lend_row["category"] == "Uncategorized",
+      _lend_row)
+
+for _batch in (ambiguous["batch"], genuine["batch"], lending_guess["batch"]):
+    client.delete(f"/imports/{_batch}", headers=AUTH)
+
+
 # --- report ---------------------------------------------------------------------
 # Must stay the LAST thing in this file. It used to sit in the middle, so the
 # checks below it printed PASS/FAIL but could not fail the run — a broken one

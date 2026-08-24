@@ -70,11 +70,16 @@ export default function ScanStatement({ available, onImported }) {
       const result = await api.screenshotImport(chosen.map((t) => ({
         amount: t.amount,
         direction: t.direction,
-        // Respect what the row actually is. Sending everything as an expense
-        // booked a GPay row literally labelled "Self transfer" as ₹10,000 of
-        // spending — money moved between the owner's own accounts, counted as
-        // a purchase. The server double-checks this too.
-        kind: t.category === 'Transfer' ? 'self' : 'expense',
+        // Always sent as a plain expense. Deciding whether a "Transfer"
+        // category is a genuine self-transfer belongs on the server — it
+        // checks the merchant TEXT for actual self-transfer language before
+        // trusting it, rather than treating the AI's category guess alone as
+        // proof. That guess has been "Transfer" for an ordinary person's name
+        // before (a real ₹120 payment to "S Sadashiva"), and trusting it here
+        // would have silently excluded that money from every total with no
+        // chance to catch it — worse than a wrong category, since a wrong
+        // category is at least still counted as spending.
+        kind: 'expense',
         category: t.category,
         merchant: t.merchant,
         occurred_on: t.occurred_on || undefined,
