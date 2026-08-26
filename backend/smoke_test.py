@@ -1616,6 +1616,18 @@ for _batch in (ambiguous["batch"], genuine["batch"], lending_guess["batch"]):
     client.delete(f"/imports/{_batch}", headers=AUTH)
 
 
+# --- row-level security is enabled on every table -----------------------------
+# gmail_auth held a Google OAuth refresh token - a live credential - and RLS
+# was never enabled on it, because it was added after RLS was first turned on
+# by hand for the other seven tables and simply never got the same treatment.
+# On the real Supabase database that means the table is readable through the
+# public REST API with no auth at all; on this test's SQLite database RLS has
+# no meaning, so the endpoint should say so honestly rather than pretending.
+rls = client.get("/admin/rls-status", headers=AUTH).json()
+check("rls-status reports it does not apply on SQLite", rls["applicable"] is False, rls)
+check("rls-status needs auth", client.get("/admin/rls-status").status_code == 401)
+
+
 # --- report ---------------------------------------------------------------------
 # Must stay the LAST thing in this file. It used to sit in the middle, so the
 # checks below it printed PASS/FAIL but could not fail the run — a broken one

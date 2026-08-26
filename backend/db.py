@@ -122,10 +122,54 @@ def _ensure_indexes():
         ))
 
 
+def _ensure_row_level_security():
+    """Enable Postgres Row-Level Security on every table this app has, with
+    no policies defined.
+
+    Supabase's own advisor flagged this as CRITICAL: with RLS off, anyone who
+    has this project's URL and its public anon key can read, edit, or delete
+    every row in a table through Supabase's REST API — completely bypassing
+    this backend's own bearer-token auth, which only guards the FastAPI
+    routes, not the database underneath them.
+
+    It went unnoticed specifically on `gmail_auth`, which holds a Google
+    OAuth refresh token — a live credential, not data, and exactly what the
+    advisor's "sensitive data publicly accessible" finding meant. That table
+    was added after RLS was first enabled by hand on the others and simply
+    never got the same treatment; a table-by-table checklist is exactly the
+    kind of thing a new table quietly falls through.
+
+    No policies are created, and none are needed: with RLS on and zero
+    policies, every role is denied by default EXCEPT the table owner (and any
+    role with BYPASSRLS), which is what this app's own DATABASE_URL connects
+    as — confirmed by the fact that this file's own ALTER TABLE / CREATE
+    INDEX migrations already succeed against it. So this only closes the
+    public REST API's access, the one path the app itself never uses, while
+    changing nothing about how the app talks to its own database.
+
+    Enabling RLS on a table twice is a no-op in Postgres, not an error — so
+    unlike `_ensure_columns`, this needs no reflection to check what is
+    already set; it simply runs for every table, every boot. Table names come
+    from the database's own catalogue, not a hand-maintained list, precisely
+    so a future table can never be silently skipped the way gmail_auth was.
+
+    Meaningless for SQLite (no RLS concept), so a no-op there — this only
+    ever does anything against the real Postgres database.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    inspector = inspect(engine)
+    tables = inspector.get_table_names()
+    with engine.begin() as conn:
+        for table in tables:
+            conn.execute(text(f'ALTER TABLE "{table}" ENABLE ROW LEVEL SECURITY'))
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
     _ensure_indexes()
+    _ensure_row_level_security()
 
 
 def get_db():

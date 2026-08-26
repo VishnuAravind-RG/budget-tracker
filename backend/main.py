@@ -19,7 +19,7 @@ load_dotenv(encoding="utf-8-sig")
 from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
-from sqlalchemy import func  # noqa: E402
+from sqlalchemy import func, text  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
@@ -1858,6 +1858,36 @@ def get_categories():
 def me():
     """Cheap endpoint the frontend hits to validate a token at login."""
     return {"status": "ok"}
+
+
+@api.get("/admin/rls-status")
+def rls_status(db: Session = Depends(get_db)):
+    """Which tables have Row-Level Security on — the exact check that would
+    have caught gmail_auth going without it.
+
+    db.py's init_db() enables RLS on every table at every boot (see
+    _ensure_row_level_security()), but a migration that runs quietly on
+    startup is easy to trust blindly. This is the way to actually confirm it
+    took effect against the real database, and to notice immediately if some
+    future table is ever added and — like gmail_auth was — forgotten.
+
+    Meaningless on SQLite (no RLS concept there), so it says so rather than
+    reporting a table list that means nothing.
+    """
+    if db.bind.dialect.name != "postgresql":
+        return {"applicable": False, "detail": "Not running against Postgres — RLS doesn't apply here."}
+
+    rows = db.execute(text(
+        "SELECT relname, relrowsecurity FROM pg_class "
+        "WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' "
+        "ORDER BY relname"
+    )).all()
+    tables = [{"table": name, "rls_enabled": bool(enabled)} for name, enabled in rows]
+    return {
+        "applicable": True,
+        "all_protected": all(t["rls_enabled"] for t in tables),
+        "tables": tables,
+    }
 
 
 # ---------------------------------------------------------------------- fuel
