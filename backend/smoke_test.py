@@ -1661,6 +1661,74 @@ check("a row that's genuinely a transfer keeps its category fine",
 client.delete(f"/transactions/{transfer_probe['id']}", headers=AUTH)
 
 
+# --- an undated screenshot row gets a wider duplicate window than a dated one ----
+# "Today" is only screenshot_import()'s FALLBACK for an undated row, not a real
+# fact - so comparing it with the same ±1-day tolerance used for two genuinely
+# dated rows under-covers exactly the case that most needs covering. Confirmed
+# live: GRACE SUPER MARKET Rs 116.17 was correctly recorded on a real date;
+# a later screenshot re-scanned the same purchase with no date attached at
+# all, defaulted to "today" (2 days out), and the tight ±1-day window missed
+# it. Payments-app history screens naturally show more than one day at once,
+# so this is a normal failure mode of re-scanning, not a rare one.
+_market_day = (main.local_now().date() - _shot_td(days=2)).isoformat()
+already_market = client.post("/transactions/manual", json={
+    "amount": 116.17, "direction": "debit", "category": "Groceries",
+    "merchant": "GRACE SUPER MARKET", "occurred_on": _market_day,
+}, headers=AUTH).json()
+
+_undated_far_rows = [
+    {"occurred_on": "", "merchant": "GRACE SUPER MARKET", "amount": 116.17,
+     "direction": "debit", "category": "Groceries"},
+]
+_db = SessionLocal()
+try:
+    main._flag_duplicates(_undated_far_rows, _db)
+finally:
+    _db.close()
+check("an undated row 2 days out from a real match is still caught",
+      _undated_far_rows[0]["already_recorded"] is True, _undated_far_rows[0])
+
+# But a row that DOES have its own date must NOT get the wide window - dated
+# "today" (a 2-day gap from the stored row, same gap the undated case above
+# was correctly caught across), it must be rejected: the wide 5-day allowance
+# is only for a row with no date of its own, never for one that disagrees
+# with an existing record by more than a day.
+_dated_today = main.local_now().date().isoformat()
+_dated_far_rows = [
+    {"occurred_on": _dated_today, "merchant": "GRACE SUPER MARKET", "amount": 116.17,
+     "direction": "debit", "category": "Groceries"},
+]
+_db = SessionLocal()
+try:
+    main._flag_duplicates(_dated_far_rows, _db)
+finally:
+    _db.close()
+check("a genuinely dated row keeps the tight ±1-day window, no regression",
+      _dated_far_rows[0]["already_recorded"] is False, _dated_far_rows[0])
+
+# And an undated row genuinely too far out (beyond the 5-day allowance) must
+# not be flagged either - the window is wide, not unbounded.
+_ancient_day = (main.local_now().date() - _shot_td(days=30)).isoformat()
+ancient_market = client.post("/transactions/manual", json={
+    "amount": 55.55, "direction": "debit", "category": "Groceries",
+    "merchant": "GRACE SUPER MARKET", "occurred_on": _ancient_day,
+}, headers=AUTH).json()
+_undated_ancient_rows = [
+    {"occurred_on": "", "merchant": "GRACE SUPER MARKET", "amount": 55.55,
+     "direction": "debit", "category": "Groceries"},
+]
+_db = SessionLocal()
+try:
+    main._flag_duplicates(_undated_ancient_rows, _db)
+finally:
+    _db.close()
+check("the wide window still has a limit — a month-old row is not caught",
+      _undated_ancient_rows[0]["already_recorded"] is False, _undated_ancient_rows[0])
+
+client.delete(f"/transactions/{already_market['id']}", headers=AUTH)
+client.delete(f"/transactions/{ancient_market['id']}", headers=AUTH)
+
+
 # --- report ---------------------------------------------------------------------
 # Must stay the LAST thing in this file. It used to sit in the middle, so the
 # checks below it printed PASS/FAIL but could not fail the run — a broken one

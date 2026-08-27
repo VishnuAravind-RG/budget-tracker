@@ -768,7 +768,9 @@ def _flag_duplicates(rows: list[dict], db: Session) -> None:
     seen_in_scan: dict[tuple, int] = {}
     for index, row in enumerate(rows):
         amount = round(row["amount"], 2)
-        date = row.get("occurred_on") or today
+        raw_date = row.get("occurred_on")
+        date = raw_date or today
+        was_dated = bool(raw_date)
         tokens = _match_key(row.get("merchant") or "")
         reason = None
 
@@ -781,9 +783,16 @@ def _flag_duplicates(rows: list[dict], db: Session) -> None:
                 if stored_day == date:
                     reason = "already recorded"
                     break
-                if tokens and (tokens & stored_tokens) and _within_a_day(date, stored_day):
-                    reason = f"already recorded on {stored_day}"
-                    break
+                if tokens and (tokens & stored_tokens):
+                    # A genuinely dated row keeps the tight ±1-day tolerance —
+                    # that one exists for two real dates disagreeing near
+                    # midnight, a narrow, well-understood case. An undated
+                    # row's "date" is only a fallback, so it gets the wider
+                    # window instead — see UNDATED_DUPLICATE_WINDOW_DAYS.
+                    window = 1 if was_dated else UNDATED_DUPLICATE_WINDOW_DAYS
+                    if _within_days(date, stored_day, window):
+                        reason = f"already recorded on {stored_day}"
+                        break
 
         row["already_recorded"] = reason is not None
         row["duplicate_reason"] = reason
@@ -791,12 +800,32 @@ def _flag_duplicates(rows: list[dict], db: Session) -> None:
 
 def _within_a_day(a: str, b: str) -> bool:
     """True when two YYYY-MM-DD strings are at most one day apart."""
+    return _within_days(a, b, 1)
+
+
+def _within_days(a: str, b: str, n: int) -> bool:
     try:
         da = date_cls.fromisoformat(a)
         db_ = date_cls.fromisoformat(b)
     except ValueError:
         return False
-    return abs((da - db_).days) <= 1
+    return abs((da - db_).days) <= n
+
+
+# How far back an UNDATED scanned row is allowed to match an existing
+# transaction by merchant + amount alone. Wider than the ±1 day used for a
+# row that genuinely HAS a date, because "today" is not a fact for an undated
+# row — it is only the fallback screenshot_import() uses when nothing better
+# is known — so treating it as a real date and applying the same tight window
+# under-covers exactly the case that most needs covering. Confirmed live: a
+# GRACE SUPER MARKET Rs 116.17 purchase was correctly recorded on 22 Aug; a
+# later screenshot re-scanned it with no date attached, defaulted to "today"
+# (24 Aug — 2 days out), and the ±1-day window missed it by one day. A
+# payments-app history screen naturally shows more than a single day at once,
+# so re-capturing an older row this way is a normal failure mode, not a rare
+# one. 5 days comfortably covers a short gap between uploads without
+# searching the whole history.
+UNDATED_DUPLICATE_WINDOW_DAYS = 5
 
 
 @api.post("/ai/scan-statement")
