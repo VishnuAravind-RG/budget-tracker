@@ -1628,6 +1628,39 @@ check("rls-status reports it does not apply on SQLite", rls["applicable"] is Fal
 check("rls-status needs auth", client.get("/admin/rls-status").status_code == 401)
 
 
+# --- recategorising to Transfer/Lending directly is refused --------------------
+# The one live gap this closes: the History tab's recategorise picker used to
+# offer all 13 categories unfiltered, including the two reserved ones -
+# unlike AddExpense.jsx and Review.jsx, which already excluded them. A real
+# Rs 100 expense ended up filed under "Transfer" this way: kind stayed
+# "expense" (so the money was still counted, at least), but the category
+# meant nothing and never got a budget meter. This endpoint never touches
+# kind, so it must refuse the two categories that always require one.
+cat_probe = client.post("/transactions/manual", json={
+    "amount": 100, "direction": "debit", "category": "Shopping", "merchant": "CATEGORY GUARD PROBE",
+}, headers=AUTH).json()
+refused = client.patch(f"/transactions/{cat_probe['id']}/category", json={"category": "Transfer"}, headers=AUTH)
+check("setting category='Transfer' on a plain expense is refused", refused.status_code == 422, refused.text)
+refused2 = client.patch(f"/transactions/{cat_probe['id']}/category", json={"category": "Lending"}, headers=AUTH)
+check("setting category='Lending' on a plain expense is refused", refused2.status_code == 422, refused2.text)
+untouched = next(t for t in client.get("/transactions", headers=AUTH).json() if t["id"] == cat_probe["id"])
+check("...and the category is genuinely unchanged after the refusal",
+      untouched["category"] == "Shopping", untouched)
+ok_recat = client.patch(f"/transactions/{cat_probe['id']}/category", json={"category": "Groceries"}, headers=AUTH)
+check("an ordinary category change still works fine", ok_recat.status_code == 200 and ok_recat.json()["category"] == "Groceries", ok_recat.text)
+client.delete(f"/transactions/{cat_probe['id']}", headers=AUTH)
+
+# A row whose kind genuinely IS transfer/lend/repayment must still be able to
+# keep its matching category - this guard is about the MISMATCH, not the
+# category itself.
+transfer_probe = client.post("/transactions/manual", json={
+    "amount": 50, "direction": "debit", "kind": "wallet", "merchant": "Paytm",
+}, headers=AUTH).json()
+check("a row that's genuinely a transfer keeps its category fine",
+      transfer_probe["category"] == "Transfer" and transfer_probe["kind"] == "topup", transfer_probe)
+client.delete(f"/transactions/{transfer_probe['id']}", headers=AUTH)
+
+
 # --- report ---------------------------------------------------------------------
 # Must stay the LAST thing in this file. It used to sit in the middle, so the
 # checks below it printed PASS/FAIL but could not fail the run — a broken one

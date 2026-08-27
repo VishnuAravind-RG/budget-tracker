@@ -110,7 +110,18 @@ export default function Transactions({ transactions, categories, monthLabel, onR
               <div style={{ paddingBottom: 12 }}>
                 {t.raw_text && <div className="raw-sms">{t.raw_text}</div>}
                 <div className="cat-grid">
-                  {categories.map((c) => (
+                  {/* "Transfer" and "Lending" are reserved — _resolve_kind()
+                      only ever assigns them itself, for a genuine self-
+                      transfer or an actual "a person" answer. This dropdown
+                      is the one place in the app that offered them anyway for
+                      an ordinary kind="expense" row: a real Rs 100 purchase
+                      ended up filed under "Transfer" this way, which doesn't
+                      touch the total (kind stays expense, so it's still
+                      counted) but leaves a category that means nothing and
+                      never gets a budget meter. AddExpense.jsx and Review.jsx
+                      already exclude both for the same reason; this now
+                      matches them. */}
+                  {categories.filter((c) => c !== 'Lending' && c !== 'Transfer').map((c) => (
                     <button
                       key={c}
                       onClick={() => {

@@ -1340,6 +1340,22 @@ def update_category(txn_id: int, payload: CategoryUpdate, db: Session = Depends(
     txn = db.get(Transaction, txn_id)
     if not txn:
         raise HTTPException(404, "Transaction not found")
+
+    # "Transfer" and "Lending" are reserved — _resolve_kind() is the only
+    # place that ever assigns them, for a genuine self-transfer or an actual
+    # "a person" answer, and both always come with a matching `kind` change.
+    # This endpoint only ever touches category, never kind, so accepting
+    # either here would leave a spending row silently wearing a category that
+    # means nothing and never gets a budget meter — which is exactly how a
+    # real Rs 100 purchase ended up filed under "Transfer" once already, via
+    # a client that (before this) let it through the picker unfiltered.
+    if payload.category in ("Transfer", "Lending") and txn.kind not in ("transfer", "lend", "repayment"):
+        raise HTTPException(
+            422,
+            f"'{payload.category}' can't be set directly — it needs the matching money-movement "
+            "kind too, not just the category. Use the 'who is this?' answer instead.",
+        )
+
     txn.category = payload.category
     txn.needs_review = False
     db.commit()
