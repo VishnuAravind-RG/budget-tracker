@@ -450,14 +450,28 @@ async def gmail_poll_endpoint(db: Session = Depends(get_db)):
         raise HTTPException(400, "Gmail not connected yet — visit /gmail/auth/start?token=<AUTH_TOKEN> once")
 
     try:
-        texts = await asyncio.to_thread(gmail_poll.fetch_new_alerts, row.refresh_token, row.last_poll_at)
+        texts, window_end = await asyncio.to_thread(
+            gmail_poll.fetch_new_alerts, row.refresh_token, row.last_poll_at
+        )
     except gmail_poll.GmailPollError as e:
         raise HTTPException(502, str(e)) from e
 
-    results = [_ingest(text, db, source="gmail") for text in texts]
-    row.last_poll_at = utc_now_naive()
+    # One malformed message must not sink every other real transaction in the
+    # same batch — each is isolated so a single bad body can't cost the rest.
+    results = []
+    for text in texts:
+        try:
+            results.append(_ingest(text, db, source="gmail"))
+        except Exception as e:  # noqa: BLE001 — genuinely must not abort the batch
+            results.append({"status": "error", "detail": str(e)})
+
+    # The watermark saved is exactly what fetch_new_alerts actually covered —
+    # NOT "now". After a long gap, that can be well short of the present; see
+    # MAX_CATCHUP_DAYS_PER_POLL's comment for why advancing straight to now
+    # would silently drop whatever backlog didn't fit in this one call.
+    row.last_poll_at = window_end.replace(tzinfo=None)
     db.commit()
-    return {"checked": len(texts), "results": results}
+    return {"checked": len(texts), "caught_up_to": row.last_poll_at.isoformat() + "Z", "results": results}
 
 
 @api.post("/transactions/manual", response_model=TransactionOut)

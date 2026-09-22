@@ -46,6 +46,24 @@ BANK_SENDERS = ["alerts@hdfcbank.bank.in"]
 # then narrow to "since last poll" for every run after.
 INITIAL_LOOKBACK_DAYS = 2
 
+# How much backlog ONE poll will attempt, in days, and how many full message
+# bodies it will fetch in that attempt. Both exist for the same reason: a
+# poll that had gone unrun for 19 days (its Gmail OAuth token had silently
+# expired) tried to fetch the ENTIRE backlog in one call — dozens of full
+# emails, fetched one at a time over the network — on a 512MB free-tier
+# instance, and it kept getting killed partway through before ever
+# committing. Worse: the watermark only ever advanced on full success, so
+# every retry re-attempted the exact same impossible backlog and could
+# never make progress — a genuine "stuck forever" bug, not just slowness.
+#
+# Capping the WINDOW (not just the result count) is what makes catch-up
+# actually terminate: each poll only ever asks Gmail for a few days' worth
+# at once, so the watermark can advance in small, safe, verified steps
+# even when there are weeks of backlog — a large gap just takes several
+# scheduled polls to fully close instead of one that can never succeed.
+MAX_CATCHUP_DAYS_PER_POLL = 3
+MAX_MESSAGES_PER_POLL = 25
+
 
 class GmailPollError(Exception):
     pass
@@ -158,30 +176,48 @@ def _extract_plain_text(payload: dict) -> str:
     return walk(payload) or ""
 
 
-def fetch_new_alerts(refresh_token: str, since: datetime | None) -> list[str]:
-    """Returns the plain-text body of every bank-alert email newer than
-    `since` (or the last INITIAL_LOOKBACK_DAYS days, on the very first poll).
+def fetch_new_alerts(refresh_token: str, since: datetime | None) -> tuple[list[str], datetime]:
+    """Returns (plain-text bodies of matching emails, the watermark to save).
+
+    The window is capped at MAX_CATCHUP_DAYS_PER_POLL — see its comment for
+    why an uncapped "everything since last time" fetch is a real bug, not
+    just a slow path. The caller MUST persist the returned watermark exactly
+    (not `datetime.utcnow()`): it marks precisely how far this call actually
+    got, which may be well short of "now" when there's a lot of backlog left.
     """
     access_token = _access_token(refresh_token)
+    now = datetime.utcnow()
 
-    cutoff = since or (datetime.utcnow() - timedelta(days=INITIAL_LOOKBACK_DAYS))
+    cutoff = since or (now - timedelta(days=INITIAL_LOOKBACK_DAYS))
+    window_end = min(cutoff + timedelta(days=MAX_CATCHUP_DAYS_PER_POLL), now)
+
     sender_q = " OR ".join(f"from:{s}" for s in BANK_SENDERS)
-    query = f"({sender_q}) after:{cutoff.strftime('%Y/%m/%d')}"
+    # `before:` needs a day of slack the same way `after:` does (both are
+    # date-only in Gmail's search grammar) — the precise internalDate check
+    # below is what actually enforces the exact boundary either side.
+    query = (
+        f"({sender_q}) after:{cutoff.strftime('%Y/%m/%d')} "
+        f"before:{(window_end + timedelta(days=1)).strftime('%Y/%m/%d')}"
+    )
 
-    list_url = f"{GMAIL_API}/messages?{urllib.parse.urlencode({'q': query, 'maxResults': 50})}"
+    list_url = f"{GMAIL_API}/messages?{urllib.parse.urlencode({'q': query, 'maxResults': MAX_MESSAGES_PER_POLL})}"
     listing = _get(list_url, access_token)
+
+    since_ms = int(since.timestamp() * 1000) if since else None
+    window_end_ms = int(window_end.timestamp() * 1000)
 
     texts = []
     for m in listing.get("messages", []):
         msg = _get(f"{GMAIL_API}/messages/{m['id']}?format=full", access_token)
-        # `after:` is date-only (no time-of-day), so it can return messages
-        # from earlier the same day as `since` — re-filter on the real
-        # internalDate to skip those. _ingest()'s own dedupe-by-raw-text
-        # would catch them anyway; this just avoids the redundant work.
+        # Both bounds are date-only in the query above; enforce the real,
+        # precise window here so nothing on either edge is double-counted or
+        # silently skipped between one poll's window and the next's.
         internal_ms = int(msg.get("internalDate", "0"))
-        if since and internal_ms <= int(since.timestamp() * 1000):
+        if since_ms is not None and internal_ms <= since_ms:
+            continue
+        if internal_ms > window_end_ms:
             continue
         text = _extract_plain_text(msg.get("payload", {}))
         if text:
             texts.append(text[:2000])
-    return texts
+    return texts, window_end
