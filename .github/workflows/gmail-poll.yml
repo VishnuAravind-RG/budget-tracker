@@ -5,10 +5,41 @@ name: Poll Gmail for bank alerts
 # never sees those. This calls the backend's own poller on a schedule so new
 # alerts get ingested automatically, the same way MacroDroid does for SMS.
 # See backend/gmail_poll.py for the one-time OAuth setup this depends on.
-
+#
+# SCHEDULE PAUSED 2026-09-22 — read this before re-enabling.
+#
+# Root cause of the failure streak: the Google Cloud OAuth consent screen for
+# this project is still in "Testing" publishing status. Google enforces a
+# hard rule for Testing apps, unconditionally: every refresh token it issues
+# expires after exactly 7 days, no matter how the app is used. That is
+# documented Google behavior, not a bug here. The timeline proved it: a
+# reconnect on 27 Aug worked until 3 Sep — 7 days later, to the day — then
+# failed on every 15-minute run for 19 straight days (~1,800 failure
+# notifications) until someone noticed.
+#
+# Reconnecting again without fixing this would only buy another 7 days
+# before it silently dies a third time.
+#
+# The real fix, one-time:
+#   1. Google Cloud Console -> APIs & Services -> OAuth consent screen
+#      (project 716976157127, the same one the Gemini key lives in)
+#   2. Publishing status currently says "Testing" -> click "Publish App" ->
+#      confirm -> it becomes "In production". This alone removes the 7-day
+#      expiry, permanently. An "unverified app" warning on the next sign-in
+#      is expected and safe to click through for a personal single-user app.
+#   3. Re-run the one-time OAuth flow to issue a fresh token that will no
+#      longer auto-expire: visit /gmail/auth/start?token=<AUTH_TOKEN>.
+#
+# Once that's done, uncomment the `schedule:` block below to resume automatic
+# polling — hourly rather than every 15 minutes, since SMS (MacroDroid) is
+# the faster, primary channel for the same alerts and Gmail is the backup;
+# a slower schedule means any FUTURE failure streak generates a quarter as
+# many notifications before someone notices. `workflow_dispatch` still lets
+# you trigger a run by hand any time, paused or not — including to confirm
+# the reconnect worked, right after step 3 above.
 on:
-  schedule:
-    - cron: "*/15 * * * *"
+  # schedule:
+  #   - cron: "0 * * * *"
   workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
 
 jobs:
