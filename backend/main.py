@@ -2214,3 +2214,99 @@ app.include_router(api)
 def health():
     """Unauthenticated so Railway's healthcheck can reach it."""
     return {"status": "ok"}
+
+
+# Google's OAuth consent screen requires a homepage and a privacy policy URL
+# on an AUTHORISED domain before the app can be published out of "Testing" —
+# and Google does not allow authorising a shared-hosting domain like
+# vercel.app (anyone can get a *.vercel.app subdomain), only rejecting the
+# attempt with "Missing domain" when tried. This backend's own onrender.com
+# domain is already authorised (it's the OAuth redirect URI), so these two
+# pages live here instead of on the Vercel frontend, deliberately outside the
+# `api` router — a consent screen has to be viewable in a browser with no
+# bearer token, the same reason /health and /gmail/auth/* aren't behind it.
+_PRIVACY_HTML = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy — Budget Tracker</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 640px; margin: 0 auto; padding: 32px 20px 64px; line-height: 1.6;
+    color: #1a1a1a; background: #fcfcfb; }
+  @media (prefers-color-scheme: dark) { body { color: #ededec; background: #0f0f0e; } a { color: #6ea8fe; } }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  .updated { color: #767672; font-size: 0.9rem; margin-bottom: 32px; }
+  h2 { font-size: 1.1rem; margin-top: 32px; }
+  ul { padding-left: 20px; } li { margin-bottom: 6px; }
+  .note { border-left: 3px solid #767672; padding: 10px 16px; margin: 24px 0;
+    background: rgba(127,127,127,0.08); font-size: 0.92rem; }
+</style></head><body>
+<h1>Privacy — Budget Tracker</h1>
+<div class="updated">Last updated: 22 September 2026</div>
+<div class="note">This is a personal expense-tracking app built and used by a single
+person (its owner). It is not a commercial product, does not accept public sign-ups,
+and this page is a plain, factual description of what the app does with data — not a
+formal legal document for a public service.</div>
+<h2>What the app stores</h2>
+<p>Everything you log in the app — transaction amounts, merchant names, categories,
+budgets, vehicle and fuel records, to-do items — is stored in a private Postgres
+database the owner controls. Access to that database is protected by Row-Level
+Security; the app itself is protected by a private access token known only to its
+owner.</p>
+<h2>How bank alerts are captured</h2>
+<p>Transactions are detected from two sources, both under the owner's own control:</p>
+<ul>
+  <li><strong>SMS forwarding</strong> — a phone automation app forwards the owner's
+  own bank SMS messages to the app.</li>
+  <li><strong>Gmail (read-only)</strong> — the app connects to one Gmail inbox via
+  Google's OAuth API, with read-only access. It only reads emails <em>from specific
+  bank sender addresses</em> (e.g. a bank's official alert address) to detect
+  transaction alerts. It does not read, store, or process any other email in the
+  inbox.</li>
+</ul>
+<p>The relevant parts of a matched alert (amount, merchant name, a masked account
+number fragment, and the bank's own transaction reference) are stored in the app's
+private database so the transaction can be shown, categorised, and totalled. This
+data is used <strong>only</strong> to run the app for its owner. It is never sold,
+shared with third parties, or used for advertising.</p>
+<h2>Third-party processing</h2>
+<p>Merchant text (e.g. "SWIGGY", "coffee shop") is occasionally sent to an AI provider
+— Google's Gemini API or Azure OpenAI — solely to guess a spending category (e.g.
+"Food &amp; Dining"). No account numbers or full alert text are sent for this; only
+the merchant name and amount. This is the only third-party data processing the app
+performs.</p>
+<h2>What this app does not do</h2>
+<ul>
+  <li>No ads, no ad tracking, no analytics beyond what's needed for the app itself to
+  work.</li>
+  <li>No data is sold or shared with anyone besides the processing described above.</li>
+  <li>No public sign-up — this app has exactly one user, its owner.</li>
+</ul>
+<h2>Contact</h2>
+<p>Questions about this app or its data handling:
+<a href="mailto:rgvishnuaravind@gmail.com">rgvishnuaravind@gmail.com</a></p>
+</body></html>"""
+
+
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy_policy():
+    return _PRIVACY_HTML
+
+
+@app.get("/", response_class=HTMLResponse)
+def homepage():
+    """Google's OAuth consent screen also requires a homepage URL on an
+    authorised domain (see /privacy above for why it lives here). The real
+    app is the Vercel PWA; this just points there and to the privacy page."""
+    return (
+        "<!DOCTYPE html><html><head><meta charset='UTF-8'>"
+        "<title>Budget Tracker</title></head><body style='font-family:sans-serif;"
+        "max-width:480px;margin:60px auto;padding:0 20px;line-height:1.6'>"
+        "<h1>Budget Tracker</h1>"
+        "<p>A personal expense-tracking app. This is the API backend — "
+        "the app itself is at <a href='https://budget-tracker-blue-gamma.vercel.app'>"
+        "budget-tracker-blue-gamma.vercel.app</a>.</p>"
+        "<p><a href='/privacy'>Privacy policy</a></p>"
+        "</body></html>"
+    )
