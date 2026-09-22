@@ -26,7 +26,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
@@ -187,6 +187,19 @@ def fetch_new_alerts(refresh_token: str, since: datetime | None) -> tuple[list[s
     """
     access_token = _access_token(refresh_token)
     now = datetime.utcnow()
+
+    # This whole app stores naive UTC everywhere (see timeutil.utc_now_naive,
+    # used to WRITE this exact column) - but what comes back on the next READ
+    # from Postgres depends on the driver/dialect, and can be timezone-aware
+    # even for a value that was written naive. The old code never noticed,
+    # because it only ever called .timestamp() on `since`, which silently
+    # accepts either. The new min()/comparison logic below does not: mixing
+    # an aware `since` with naive `now` throws "can't compare offset-naive
+    # and offset-aware datetimes" - confirmed live, a real 500 on the very
+    # first production run of this fix. Normalising here, once, is cheaper
+    # and more robust than auditing every downstream comparison.
+    if since is not None and since.tzinfo is not None:
+        since = since.astimezone(timezone.utc).replace(tzinfo=None)
 
     cutoff = since or (now - timedelta(days=INITIAL_LOOKBACK_DAYS))
     window_end = min(cutoff + timedelta(days=MAX_CATCHUP_DAYS_PER_POLL), now)
