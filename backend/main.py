@@ -458,11 +458,24 @@ async def gmail_poll_endpoint(db: Session = Depends(get_db)):
 
     # One malformed message must not sink every other real transaction in the
     # same batch — each is isolated so a single bad body can't cost the rest.
+    #
+    # The rollback here is load-bearing, not defensive boilerplate: confirmed
+    # live, its absence turned one failed _ingest() into total request
+    # failure. Postgres marks a transaction "aborted" after any failed
+    # statement and refuses every further query on that same connection —
+    # including the harmless SELECT that reloads `row` and the final commit
+    # — until an explicit rollback ends the aborted transaction. Catching the
+    # Python exception without rolling back left the session poisoned for
+    # everything after the first failure, which is exactly what happened
+    # against the real backlog: a duplicate already captured by SMS threw
+    # inside _ingest(), and every message after it failed too, all the way
+    # to the final commit.
     results = []
     for text in texts:
         try:
             results.append(_ingest(text, db, source="gmail"))
         except Exception as e:  # noqa: BLE001 — genuinely must not abort the batch
+            db.rollback()
             results.append({"status": "error", "detail": str(e)})
 
     # The watermark saved is exactly what fetch_new_alerts actually covered —
