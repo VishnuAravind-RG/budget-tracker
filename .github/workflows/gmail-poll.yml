@@ -6,40 +6,32 @@ name: Poll Gmail for bank alerts
 # alerts get ingested automatically, the same way MacroDroid does for SMS.
 # See backend/gmail_poll.py for the one-time OAuth setup this depends on.
 #
-# SCHEDULE PAUSED 2026-09-22 — read this before re-enabling.
+# RESUMED 2026-09-22, after a full incident: the Google Cloud OAuth consent
+# screen for this project was left in "Testing" status, which expires every
+# refresh token after exactly 7 days no matter how the app is used. A
+# reconnect on 27 Aug worked until 3 Sep, then failed silently on every
+# 15-minute run for 19 straight days (~1,800 failure notifications) until
+# someone noticed. Fixed permanently by publishing the consent screen to
+# "In production" in Google Cloud Console (project 716976157127) — that
+# removes the 7-day expiry for good, no periodic reconnect needed.
 #
-# Root cause of the failure streak: the Google Cloud OAuth consent screen for
-# this project is still in "Testing" publishing status. Google enforces a
-# hard rule for Testing apps, unconditionally: every refresh token it issues
-# expires after exactly 7 days, no matter how the app is used. That is
-# documented Google behavior, not a bug here. The timeline proved it: a
-# reconnect on 27 Aug worked until 3 Sep — 7 days later, to the day — then
-# failed on every 15-minute run for 19 straight days (~1,800 failure
-# notifications) until someone noticed.
+# The 19-day backlog that piled up during the outage exposed a second, real
+# bug: fetch_new_alerts() used to fetch an unbounded amount of backlog in one
+# call, which the free tier's 512MB instance couldn't handle, and because the
+# sync watermark only advanced on full success, every retry repeated the same
+# impossible fetch forever. Fixed in gmail_poll.py: each poll now covers at
+# most MAX_CATCHUP_DAYS_PER_POLL days and saves real, incremental progress —
+# a large gap closes over several small polls instead of one that can't
+# succeed. The 19-day backlog was manually run down after the fix landed;
+# steady state now takes one poll per hour to stay current.
 #
-# Reconnecting again without fixing this would only buy another 7 days
-# before it silently dies a third time.
-#
-# The real fix, one-time:
-#   1. Google Cloud Console -> APIs & Services -> OAuth consent screen
-#      (project 716976157127, the same one the Gemini key lives in)
-#   2. Publishing status currently says "Testing" -> click "Publish App" ->
-#      confirm -> it becomes "In production". This alone removes the 7-day
-#      expiry, permanently. An "unverified app" warning on the next sign-in
-#      is expected and safe to click through for a personal single-user app.
-#   3. Re-run the one-time OAuth flow to issue a fresh token that will no
-#      longer auto-expire: visit /gmail/auth/start?token=<AUTH_TOKEN>.
-#
-# Once that's done, uncomment the `schedule:` block below to resume automatic
-# polling — hourly rather than every 15 minutes, since SMS (MacroDroid) is
-# the faster, primary channel for the same alerts and Gmail is the backup;
-# a slower schedule means any FUTURE failure streak generates a quarter as
-# many notifications before someone notices. `workflow_dispatch` still lets
-# you trigger a run by hand any time, paused or not — including to confirm
-# the reconnect worked, right after step 3 above.
+# Hourly rather than every 15 minutes deliberately: SMS (MacroDroid) is the
+# faster, primary channel for the same alerts, and Gmail is the backup — a
+# slower schedule means any future failure generates a quarter as many
+# notifications before it's noticed.
 on:
-  # schedule:
-  #   - cron: "0 * * * *"
+  schedule:
+    - cron: "0 * * * *"
   workflow_dispatch: {} # lets you trigger a run manually from the Actions tab
 
 jobs:
